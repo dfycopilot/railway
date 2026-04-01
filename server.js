@@ -1,3 +1,4 @@
+const { buildFilterChain } = require("./filters");
 const express = require("express");
 const { execFile } = require("child_process");
 const fs = require("fs");
@@ -16,7 +17,7 @@ const WORK_DIR = "/tmp/renders";
 
 // ---------- Auth middleware ----------
 function authMiddleware(req, res, next) {
-  if (!AUTH_TOKEN) return next(); // no token = open (dev only)
+  if (!AUTH_TOKEN) return next();
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : header;
   if (token !== AUTH_TOKEN) {
@@ -33,7 +34,6 @@ async function downloadFile(url, dest) {
     const file = fs.createWriteStream(dest);
     proto.get(url, (resp) => {
       if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-        // Follow redirect
         downloadFile(resp.headers.location, dest).then(resolve).catch(reject);
         return;
       }
@@ -51,7 +51,6 @@ async function downloadFile(url, dest) {
 async function uploadToSupabase(filePath, storageUpload, outputPath) {
   const fileBuffer = await fsp.readFile(filePath);
   const uploadUrl = `${storageUpload.url}/${outputPath}`;
-
   return new Promise((resolve, reject) => {
     const url = new URL(uploadUrl);
     const proto = url.protocol === "https:" ? https : http;
@@ -111,7 +110,7 @@ async function sendCallback(callbackUrl, callbackHeaders, body) {
 function runFFmpeg(args) {
   return new Promise((resolve, reject) => {
     console.log("FFmpeg command:", "ffmpeg", args.join(" "));
-    const proc = execFile("ffmpeg", args, { maxBuffer: 50 * 1024 * 1024, timeout: 600000 }, (err, stdout, stderr) => {
+    execFile("ffmpeg", args, { maxBuffer: 50 * 1024 * 1024, timeout: 600000 }, (err, stdout, stderr) => {
       if (err) {
         console.error("FFmpeg stderr:", stderr);
         reject(new Error(`FFmpeg failed: ${err.message}\n${stderr}`));
@@ -138,7 +137,6 @@ Style: Default,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
-
   for (const cap of captions) {
     const start = formatASSTime(cap.start);
     const end = formatASSTime(cap.end);
@@ -197,7 +195,6 @@ async function buildFFmpegCommand(spec, workDir) {
   const captions = spec.captions || [];
 
   // --- Segment cutting ---
-  // Create trimmed segments from source
   const segLabels = [];
   for (let i = 0; i < keepSegs.length; i++) {
     const seg = keepSegs[i];
@@ -211,45 +208,33 @@ async function buildFFmpegCommand(spec, workDir) {
   }
 
   // --- Interleave B-roll ---
-  // For each b-roll clip, find its insert position and split the timeline
-  // Simple approach: concat all segments with b-roll inserted at the right positions
-  const timeline = []; // { type: 'source'|'broll', vLabel, aLabel }
-
+  const timeline = [];
   if (brollClips.length === 0) {
-    // No b-roll, just concat source segments
     for (let i = 0; i < segLabels.length; i++) {
       timeline.push({ type: "source", v: `[${segLabels[i].v}]`, a: `[${segLabels[i].a}]` });
     }
   } else {
-    // Scale b-roll to match source dimensions and create timeline
-    // First, get source dimensions (we'll use scale=-2:ih to match)
     for (let bi = 0; bi < brollClips.length; bi++) {
       const brollInputIdx = srcIdx + 1 + bi;
       const clip = brollClips[bi];
-      // Scale b-roll to source dimensions and trim to duration
       filterParts.push(
         `[${brollInputIdx}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setpts=PTS-STARTPTS[bv${bi}]`
       );
-      // Use silent audio for b-roll overlay
       filterParts.push(
         `aevalsrc=0:d=${clip.duration}[ba${bi}]`
       );
     }
 
-    // Simple interleave: source segments in order, b-roll appended between segments
     let brollIdx = 0;
     let elapsed = 0;
     for (let i = 0; i < segLabels.length; i++) {
-      // Check if any b-roll should go before this segment
       while (brollIdx < brollClips.length && brollClips[brollIdx].insert_at <= elapsed + segLabels[i].duration) {
-        // Insert b-roll
         timeline.push({ type: "broll", v: `[bv${brollIdx}]`, a: `[ba${brollIdx}]` });
         brollIdx++;
       }
       timeline.push({ type: "source", v: `[${segLabels[i].v}]`, a: `[${segLabels[i].a}]` });
       elapsed += segLabels[i].duration;
     }
-    // Remaining b-roll
     while (brollIdx < brollClips.length) {
       timeline.push({ type: "broll", v: `[bv${brollIdx}]`, a: `[ba${brollIdx}]` });
       brollIdx++;
@@ -272,6 +257,13 @@ async function buildFFmpegCommand(spec, workDir) {
       `${finalV}ass='${assPath.replace(/'/g, "'\\''")}'[captioned]`
     );
     finalV = "[captioned]";
+  }
+
+  // --- Advanced visual effects (color grading, zoom, text, letterbox) ---
+  const vf = buildFilterChain(spec);
+  if (vf) {
+    filterParts.push(`${finalV}${vf}[effected]`);
+    finalV = "[effected]";
   }
 
   // --- Music mixing ---
@@ -314,7 +306,7 @@ async function buildFFmpegCommand(spec, workDir) {
 app.get("/", (req, res) => {
   res.json({
     service: "FFmpeg Render Worker",
-    version: "1.0.0",
+    version: "1.1.0",
     endpoints: [
       { method: "GET", path: "/health", description: "Health check" },
       { method: "POST", path: "/render", description: "Submit render job" },
@@ -326,7 +318,6 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", uptime: process.uptime() });
 });
 
-// Render endpoint — async processing
 app.post("/render", authMiddleware, async (req, res) => {
   const spec = req.body;
   if (!spec || !spec.job_id || !spec.source_video_url) {
@@ -336,22 +327,18 @@ app.post("/render", authMiddleware, async (req, res) => {
   const renderId = uuidv4();
   const workDir = path.join(WORK_DIR, renderId);
 
-  // Respond immediately with render_id
   res.json({ render_id: renderId, status: "processing" });
 
-  // Process in background
   (async () => {
     try {
       await fsp.mkdir(workDir, { recursive: true });
 
-      // Send progress: downloading
       await sendCallback(spec.callback_url, spec.callback_headers, {
         job_id: spec.job_id,
         status: "processing",
         progress: 10,
       });
 
-      // Build and run FFmpeg
       console.log(`[${renderId}] Building FFmpeg command...`);
       const { args, outputPath } = await buildFFmpegCommand(spec, workDir);
 
@@ -370,7 +357,6 @@ app.post("/render", authMiddleware, async (req, res) => {
         progress: 80,
       });
 
-      // Upload result to Supabase storage
       console.log(`[${renderId}] Uploading result...`);
       await uploadToSupabase(outputPath, spec.storage_upload, spec.output_path);
 
@@ -389,7 +375,6 @@ app.post("/render", authMiddleware, async (req, res) => {
         error: e.message,
       });
     } finally {
-      // Cleanup work directory
       try { await fsp.rm(workDir, { recursive: true, force: true }); } catch {}
     }
   })();
