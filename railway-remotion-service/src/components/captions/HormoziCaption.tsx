@@ -4,7 +4,7 @@ import type { TikTokPage } from "@remotion/captions";
 import type { CaptionPreset } from "../../presets/captionPresets";
 import { loadFont } from "@remotion/google-fonts/Oswald";
 
-const { fontFamily } = loadFont("normal", { weights: ["900"], subsets: ["latin"] });
+const { fontFamily } = loadFont("normal", { weights: ["700"], subsets: ["latin"] });
 
 /**
  * Hormozi Bold — Alex Hormozi / Ali Abdaal style
@@ -52,7 +52,7 @@ export const HormoziCaption: React.FC<{ page: TikTokPage; preset: CaptionPreset 
               style={{
                 fontFamily,
                 fontSize: preset.font_size,
-                fontWeight: 900,
+                fontWeight: 700,
                 textTransform: "uppercase",
                 transform: `scale(${scale})`,
                 opacity,
