@@ -53,7 +53,7 @@ export const TikTokCaption: React.FC<{ page: TikTokPage; preset: CaptionPreset }
               style={{
                 fontFamily,
                 fontSize: preset.font_size,
-                fontWeight: 800,
+                fontWeight: 700,
                 textTransform: "uppercase",
                 color: isActive ? preset.highlight_color : "white",
                 transform: `scale(${scale * activeScale}) translateY(${y}px) rotate(${rotation}deg)`,
