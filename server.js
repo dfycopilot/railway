@@ -1,16 +1,3 @@
-// =====================================================================
-// UPDATED server.js for Railway FFmpeg worker
-// 
-// FIX: Adds normalize filters (scale + fps + format) to ALL segments
-// (source AND b-roll) before concat to prevent:
-//   - "MB rate > level limit" from framerate mismatches (30fps + 25fps)
-//   - Encoder init failures from rotation-caused dimension mismatches
-//   - iPhone -90° rotation producing unexpected dimensions
-//
-// REPLACE the buildFFmpegCommand function in your Railway server.js
-// with this version. Everything else stays the same.
-// =====================================================================
-
 const { buildFilterChain } = require("./filters");
 const express = require("express");
 const { execFile } = require("child_process");
@@ -63,7 +50,34 @@ async function downloadFile(url, dest) {
 
 async function uploadToSupabase(filePath, storageUpload, outputPath) {
   const fileBuffer = await fsp.readFile(filePath);
-  const uploadUrl = `${storageUpload.url}/${outputPath}`;
+
+  // Support new signed-URL format (preferred) or legacy authorization format
+  let uploadUrl;
+  let method;
+  let headers;
+
+  if (storageUpload.signed_url) {
+    // New format: use the pre-signed URL directly — no auth header needed
+    uploadUrl = storageUpload.signed_url;
+    method = "PUT";
+    headers = {
+      "Content-Type": "video/mp4",
+      "Content-Length": fileBuffer.length,
+    };
+    console.log("Using signed upload URL (no auth header needed)");
+  } else {
+    // Legacy format: build URL from base + path, use Authorization header
+    uploadUrl = `${storageUpload.url}/${outputPath}`;
+    method = "POST";
+    headers = {
+      "Authorization": storageUpload.authorization,
+      "Content-Type": "video/mp4",
+      "Content-Length": fileBuffer.length,
+      "x-upsert": "true",
+    };
+    console.log("Using legacy upload with Authorization header");
+  }
+
   return new Promise((resolve, reject) => {
     const url = new URL(uploadUrl);
     const proto = url.protocol === "https:" ? https : http;
@@ -71,13 +85,8 @@ async function uploadToSupabase(filePath, storageUpload, outputPath) {
       hostname: url.hostname,
       port: url.port,
       path: url.pathname + url.search,
-      method: "POST",
-      headers: {
-        "Authorization": storageUpload.authorization,
-        "Content-Type": "video/mp4",
-        "Content-Length": fileBuffer.length,
-        "x-upsert": "true",
-      },
+      method,
+      headers,
     }, (resp) => {
       let data = "";
       resp.on("data", (chunk) => data += chunk);
@@ -150,6 +159,7 @@ Style: Default,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
+
   for (const cap of captions) {
     const start = formatASSTime(cap.start);
     const end = formatASSTime(cap.end);
@@ -173,9 +183,6 @@ async function buildFFmpegCommand(spec, workDir) {
   const filterParts = [];
   let inputIdx = 0;
 
-  // --- Read normalize settings (CRITICAL FIX) ---
-  // These ensure ALL segments have identical resolution, framerate, and pixel format
-  // before concat, preventing encoder crashes from mismatched streams.
   const norm = spec.normalize || {};
   const normEnabled = norm.enabled !== false;
   const outW = norm.width || 1080;
@@ -183,10 +190,6 @@ async function buildFFmpegCommand(spec, workDir) {
   const outFps = norm.fps || 30;
   const outFmt = norm.pixel_format || "yuv420p";
 
-  // The normalize filter chain applied to every video segment
-  // scale: force exact output dimensions (handles rotation, different resolutions)
-  // fps: force exact framerate (prevents "MB rate > level limit" from mixed fps)
-  // format: force pixel format for encoder compatibility
   const normFilter = normEnabled
     ? `,scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2,fps=${outFps},format=${outFmt}`
     : "";
@@ -225,12 +228,9 @@ async function buildFFmpegCommand(spec, workDir) {
   const brollClips = spec.broll_clips || [];
   const captions = spec.captions || [];
 
-  // --- Segment cutting (with normalization) ---
   const segLabels = [];
   for (let i = 0; i < keepSegs.length; i++) {
     const seg = keepSegs[i];
-    // CRITICAL: Apply normalize filter AFTER trim+setpts so every source segment
-    // has identical resolution, framerate, and pixel format
     filterParts.push(
       `[${srcIdx}:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS${normFilter}[sv${i}]`
     );
@@ -250,7 +250,6 @@ async function buildFFmpegCommand(spec, workDir) {
     for (let bi = 0; bi < brollClips.length; bi++) {
       const brollInputIdx = srcIdx + 1 + bi;
       const clip = brollClips[bi];
-      // CRITICAL: B-roll also gets the same normalize filter for consistent dimensions/fps
       if (normEnabled) {
         filterParts.push(
           `[${brollInputIdx}:v]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},fps=${outFps},format=${outFmt},setpts=PTS-STARTPTS[bv${bi}]`
@@ -299,7 +298,7 @@ async function buildFFmpegCommand(spec, workDir) {
     finalV = "[captioned]";
   }
 
-  // --- Advanced visual effects (color grading, zoom, text, letterbox) ---
+  // --- Advanced visual effects ---
   try {
     const vf = buildFilterChain(spec);
     if (vf && vf.trim().length > 0) {
@@ -350,7 +349,7 @@ async function buildFFmpegCommand(spec, workDir) {
 app.get("/", (req, res) => {
   res.json({
     service: "FFmpeg Render Worker",
-    version: "1.2.0",
+    version: "1.3.0",
     endpoints: [
       { method: "GET", path: "/health", description: "Health check" },
       { method: "POST", path: "/render", description: "Submit render job" },
@@ -370,7 +369,6 @@ app.post("/render", authMiddleware, async (req, res) => {
 
   const renderId = uuidv4();
   const workDir = path.join(WORK_DIR, renderId);
-
   res.json({ render_id: renderId, status: "processing" });
 
   (async () => {
