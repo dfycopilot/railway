@@ -4,7 +4,7 @@ import type { TikTokPage } from "@remotion/captions";
 import type { CaptionPreset } from "../../presets/captionPresets";
 import { loadFont } from "@remotion/google-fonts/Montserrat";
 
-const { fontFamily } = loadFont("normal", { weights: ["800"], subsets: ["latin"] });
+const { fontFamily } = loadFont("normal", { weights: ["700"], subsets: ["latin"] });
 
 /**
  * TikTok Trendy — Bouncy spring animations, colorful word highlighting,
