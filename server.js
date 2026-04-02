@@ -191,7 +191,7 @@ async function buildFFmpegCommand(spec, workDir) {
   const outFmt = norm.pixel_format || "yuv420p";
 
   const normFilter = normEnabled
-    ? `,scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2,fps=${outFps},format=${outFmt}`
+    ? `,scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${outFps},format=${outFmt}`
     : "";
 
   // 1. Download source video
@@ -252,11 +252,11 @@ async function buildFFmpegCommand(spec, workDir) {
       const clip = brollClips[bi];
       if (normEnabled) {
         filterParts.push(
-          `[${brollInputIdx}:v]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},fps=${outFps},format=${outFmt},setpts=PTS-STARTPTS[bv${bi}]`
+          `[${brollInputIdx}:v]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},setsar=1,fps=${outFps},format=${outFmt},setpts=PTS-STARTPTS[bv${bi}]`
         );
       } else {
         filterParts.push(
-          `[${brollInputIdx}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setpts=PTS-STARTPTS[bv${bi}]`
+          `[${brollInputIdx}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,setpts=PTS-STARTPTS[bv${bi}]`
         );
       }
       filterParts.push(
