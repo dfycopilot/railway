@@ -51,13 +51,11 @@ async function downloadFile(url, dest) {
 async function uploadToSupabase(filePath, storageUpload, outputPath) {
   const fileBuffer = await fsp.readFile(filePath);
 
-  // Support new signed-URL format (preferred) or legacy authorization format
   let uploadUrl;
   let method;
   let headers;
 
   if (storageUpload.signed_url) {
-    // New format: use the pre-signed URL directly — no auth header needed
     uploadUrl = storageUpload.signed_url;
     method = "PUT";
     headers = {
@@ -66,7 +64,6 @@ async function uploadToSupabase(filePath, storageUpload, outputPath) {
     };
     console.log("Using signed upload URL (no auth header needed)");
   } else {
-    // Legacy format: build URL from base + path, use Authorization header
     uploadUrl = `${storageUpload.url}/${outputPath}`;
     method = "POST";
     headers = {
@@ -145,16 +142,22 @@ function runFFmpeg(args) {
 
 // Generate ASS subtitle file from captions
 function generateASSFromCaptions(captions, videoWidth = 1080, videoHeight = 1920) {
-  const fontSize = Math.round(videoWidth * 0.045);
+  // Larger font for mobile-first vertical video (roughly 3.2% of height)
+  const fontSize = Math.round(videoHeight * 0.032);
+  const outline = Math.max(3, Math.round(fontSize * 0.08));
+  const shadow = Math.round(outline * 0.5);
+  const marginV = Math.round(videoHeight * 0.12);
+
   let ass = `[Script Info]
 Title: Captions
 ScriptType: v4.00+
 PlayResX: ${videoWidth}
 PlayResY: ${videoHeight}
+WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,3,2,0,2,40,40,60,1
+Style: Default,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&HAA000000,-1,0,0,0,100,100,0,0,1,${outline},${shadow},2,40,40,${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -163,10 +166,28 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   for (const cap of captions) {
     const start = formatASSTime(cap.start);
     const end = formatASSTime(cap.end);
-    const text = (cap.text || "").replace(/\n/g, "\\N");
-    ass += `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}\n`;
+    // Word-wrap long lines at ~30 chars for vertical video readability
+    const raw = (cap.text || "").replace(/\n/g, " ");
+    const wrapped = wordWrap(raw, 30).join("\\N");
+    ass += `Dialogue: 0,${start},${end},Default,,0,0,0,,${wrapped}\n`;
   }
   return ass;
+}
+
+function wordWrap(text, maxChars) {
+  const words = text.split(" ");
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    if (current.length + word.length + 1 > maxChars && current.length > 0) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = current ? current + " " + word : word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
 }
 
 function formatASSTime(seconds) {
@@ -215,18 +236,26 @@ async function buildFFmpegCommand(spec, workDir) {
 
   // 3. Download music if provided
   let musicIdx = -1;
-  if (spec.music?.url) {
-    const musicPath = path.join(workDir, "music.mp3");
-    console.log("Downloading background music...");
+  if (spec.music && spec.music.url) {
+    const ext = spec.music.url.includes(".mp3") ? "mp3" : "m4a";
+    const musicPath = path.join(workDir, `music.${ext}`);
+    console.log("Downloading background music:", spec.music.url);
     await downloadFile(spec.music.url, musicPath);
     inputs.push("-i", musicPath);
     musicIdx = inputIdx++;
+    console.log(`Music loaded as input index ${musicIdx}`);
   }
 
   // 4. Build filter_complex
   const keepSegs = spec.keep_segments || [];
   const brollClips = spec.broll_clips || [];
   const captions = spec.captions || [];
+
+  // Calculate total source duration for b-roll audio extraction
+  let totalSourceDuration = 0;
+  for (const seg of keepSegs) {
+    totalSourceDuration += seg.end - seg.start;
+  }
 
   const segLabels = [];
   for (let i = 0; i < keepSegs.length; i++) {
@@ -250,17 +279,24 @@ async function buildFFmpegCommand(spec, workDir) {
     for (let bi = 0; bi < brollClips.length; bi++) {
       const brollInputIdx = srcIdx + 1 + bi;
       const clip = brollClips[bi];
+      const brollDur = clip.duration || 5;
+
+      // FIX 1: Trim b-roll to its specified duration instead of using the entire clip
       if (normEnabled) {
         filterParts.push(
-          `[${brollInputIdx}:v]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},setsar=1,fps=${outFps},format=${outFmt},setpts=PTS-STARTPTS[bv${bi}]`
+          `[${brollInputIdx}:v]trim=0:${brollDur},setpts=PTS-STARTPTS,scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},setsar=1,fps=${outFps},format=${outFmt}[bv${bi}]`
         );
       } else {
         filterParts.push(
-          `[${brollInputIdx}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,setpts=PTS-STARTPTS[bv${bi}]`
+          `[${brollInputIdx}:v]trim=0:${brollDur},setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[bv${bi}]`
         );
       }
+
+      // FIX 2: Preserve source audio during b-roll instead of silence
+      // Use the source video's audio at the b-roll insert point
+      const insertAt = clip.insert_at || 0;
       filterParts.push(
-        `aevalsrc=0:d=${clip.duration}[ba${bi}]`
+        `[${srcIdx}:a]atrim=start=${insertAt}:end=${insertAt + brollDur},asetpts=PTS-STARTPTS[ba${bi}]`
       );
     }
 
@@ -292,8 +328,10 @@ async function buildFFmpegCommand(spec, workDir) {
     const assPath = path.join(workDir, "captions.ass");
     const assContent = generateASSFromCaptions(captions, outW, outH);
     await fsp.writeFile(assPath, assContent);
+    // Escape path for FFmpeg filter (colons, backslashes)
+    const escapedAssPath = assPath.replace(/\\/g, "/").replace(/:/g, "\\:");
     filterParts.push(
-      `${finalV}ass='${assPath.replace(/'/g, "'\\''")}'[captioned]`
+      `${finalV}ass='${escapedAssPath}'[captioned]`
     );
     finalV = "[captioned]";
   }
@@ -309,10 +347,12 @@ async function buildFFmpegCommand(spec, workDir) {
     console.warn("Skipping advanced effects due to error:", filterErr.message);
   }
 
-  // --- Music mixing ---
+  // --- FIX 3: Music mixing (properly download and mix background music) ---
   let finalA = "[concata]";
   if (musicIdx >= 0 && spec.music) {
-    const vol = spec.music.volume || 0.15;
+    const vol = spec.music.volume != null ? spec.music.volume : 0.15;
+    console.log(`Mixing music at volume ${vol} from input ${musicIdx}`);
+    // Loop music to cover entire video, then mix with source audio
     filterParts.push(
       `[${musicIdx}:a]volume=${vol},aloop=loop=-1:size=2e+09[musicloop]`
     );
@@ -349,7 +389,7 @@ async function buildFFmpegCommand(spec, workDir) {
 app.get("/", (req, res) => {
   res.json({
     service: "FFmpeg Render Worker",
-    version: "1.3.0",
+    version: "1.4.0",
     endpoints: [
       { method: "GET", path: "/health", description: "Health check" },
       { method: "POST", path: "/render", description: "Submit render job" },
