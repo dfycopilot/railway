@@ -12,6 +12,14 @@ import { Overlays } from "./components/Overlays";
 import { MusicTrack } from "./components/MusicTrack";
 import { compositionSchema } from "./schema";
 import { z } from "zod";
+import { StatCallout } from "./components/StatCallout";
+import { LowerThird } from "./components/LowerThird";
+import { SnapZoom } from "./components/SnapZoom";
+import { KineticText } from "./components/KineticText";
+import { LightLeak } from "./components/LightLeak";
+import { FilmGrain } from "./components/FilmGrain";
+import { CornerBrackets } from "./components/CornerBrackets";
+import { Vignette } from "./components/Vignette";
 
 type Props = z.infer<typeof compositionSchema>;
 
