@@ -33,7 +33,7 @@ function authMiddleware(req, res, next) {
 
 // ---------- Health ----------
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "remotion-composition", version: "1.1.0" });
+  res.json({ status: "ok", service: "remotion-composition", version: "1.2.0" });
 });
 
 // ---------- Bundle cache ----------
@@ -53,21 +53,234 @@ async function getBundleUrl() {
 // Pre-bundle on startup
 getBundleUrl().catch((e) => console.error("[bundle] Pre-bundle failed:", e));
 
+// ---------- Helpers ----------
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function firstObject(...values) {
+  for (const value of values) {
+    if (isPlainObject(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function firstPositiveInt(...values) {
+  for (const value of values) {
+    const num = Number(value);
+    if (Number.isFinite(num) && num > 0) {
+      return Math.round(num);
+    }
+  }
+  return null;
+}
+
+function safeUnlink(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (e) {
+    console.warn(`[cleanup] Failed to remove ${filePath}:`, e?.message || e);
+  }
+}
+
+function buildInputProps(specData, specPath) {
+  return {
+    specData,
+    spec_data: specData,
+    compositionSpec: specData,
+    specPath,
+  };
+}
+
+function summarizeSpec(specData) {
+  const sceneCount = Array.isArray(specData?.scenes) ? specData.scenes.length : 0;
+  const captionCount = Array.isArray(specData?.captions) ? specData.captions.length : 0;
+  const overlayKeys = isPlainObject(specData?.overlays) ? Object.keys(specData.overlays) : [];
+  const hasMusic = Boolean(
+    firstString(
+      specData?.music?.url,
+      specData?.music?.src,
+      specData?.music_url,
+      specData?.musicUrl,
+    ),
+  );
+
+  return {
+    sceneCount,
+    captionCount,
+    overlayKeys,
+    hasMusic,
+  };
+}
+
+function resolveRenderRequest(body = {}) {
+  const inputPropContainer =
+    firstObject(body.input_props, body.inputProps, body.props) || {};
+
+  const rawSpecData =
+    firstObject(
+      body.specData,
+      body.spec_data,
+      inputPropContainer.specData,
+      inputPropContainer.spec_data,
+      inputPropContainer.compositionSpec,
+      isPlainObject(body.composition) ? body.composition : null,
+    ) || {};
+
+  const width = firstPositiveInt(body.width, rawSpecData.width) || 1920;
+  const height = firstPositiveInt(body.height, rawSpecData.height) || 1080;
+  const fps = firstPositiveInt(body.fps, rawSpecData.fps) || 30;
+  const durationInFrames =
+    firstPositiveInt(
+      body.durationInFrames,
+      body.duration_frames,
+      body.durationFrames,
+      rawSpecData.durationInFrames,
+      rawSpecData.duration_frames,
+      rawSpecData.durationFrames,
+    ) || 900;
+
+  const specData = {
+    ...rawSpecData,
+    width,
+    height,
+    fps,
+    durationInFrames,
+    duration_frames: durationInFrames,
+    durationFrames: durationInFrames,
+  };
+
+  const requestedCompositionId = firstString(
+    body.composition_id,
+    body.compositionId,
+    typeof body.composition === "string" ? body.composition : null,
+  );
+
+  const compositionCandidates = [
+    ...new Set(
+      [requestedCompositionId, "main", "FullComposition"].filter(Boolean),
+    ),
+  ];
+
+  const storageUpload = firstObject(body.storage_upload, body.storageUpload) || {};
+  const signedUrl = firstString(storageUpload.signed_url, storageUpload.signedUrl);
+  const outputPath = firstString(body.output_path, body.outputPath, storageUpload.path);
+  const callbackUrl = firstString(body.callback_url, body.callbackUrl);
+  const callbackHeaders = firstObject(body.callback_headers, body.callbackHeaders);
+
+  return {
+    jobId: firstString(body.job_id, body.jobId),
+    specData,
+    width,
+    height,
+    fps,
+    durationInFrames,
+    compositionCandidates,
+    storageUpload: {
+      ...storageUpload,
+      signedUrl,
+    },
+    outputPath,
+    callbackUrl,
+    callbackHeaders,
+    ...summarizeSpec(specData),
+  };
+}
+
+async function selectCompositionWithFallback({
+  serveUrl,
+  puppeteerInstance,
+  inputProps,
+  compositionCandidates,
+}) {
+  let lastError = null;
+
+  for (const id of compositionCandidates) {
+    try {
+      const composition = await selectComposition({
+        serveUrl,
+        id,
+        puppeteerInstance,
+        inputProps,
+      });
+      return { composition, compositionId: id };
+    } catch (error) {
+      lastError = error;
+      console.warn(
+        `[render] Composition "${id}" unavailable, trying next candidate:`,
+        error?.message || error,
+      );
+    }
+  }
+
+  throw lastError || new Error("No compatible Remotion composition found");
+}
+
+async function postCallback(callbackUrl, headers, payload) {
+  if (!callbackUrl) return;
+
+  await fetch(callbackUrl, {
+    method: "POST",
+    headers: headers || { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+function createProgressReporter(callbackUrl, headers, jobId) {
+  let lastProgress = null;
+
+  return async (progress) => {
+    if (!callbackUrl) return;
+
+    const normalized = Math.max(0, Math.min(100, Math.round(progress)));
+    if (normalized === lastProgress) return;
+    lastProgress = normalized;
+
+    try {
+      await postCallback(callbackUrl, headers, {
+        job_id: jobId,
+        status: "processing",
+        progress: normalized,
+      });
+    } catch (_e) {
+      // Non-fatal
+    }
+  };
+}
+
 // ---------- POST /render-composition ----------
 app.post("/render-composition", authMiddleware, async (req, res) => {
   const startTime = Date.now();
   const renderId = crypto.randomUUID();
-  const {
-    job_id,
-    composition: compositionSpec,
-    storage_upload,
-    output_path,
-    callback_url,
-    callback_headers,
-  } = req.body;
+  const renderRequest = resolveRenderRequest(req.body);
 
-  if (!job_id || !compositionSpec) {
-    return res.status(400).json({ error: "job_id and composition are required" });
+  if (!renderRequest.jobId) {
+    return res.status(400).json({ error: "job_id is required" });
+  }
+
+  if (!isPlainObject(renderRequest.specData) || Object.keys(renderRequest.specData).length === 0) {
+    return res.status(400).json({
+      error: "No composition spec found. Expected input_props.specData (or equivalent).",
+    });
+  }
+
+  if (!renderRequest.storageUpload?.signedUrl || !renderRequest.outputPath) {
+    return res.status(400).json({
+      error: "Missing storage_upload.signed_url or output_path",
+    });
   }
 
   // Respond immediately — rendering happens async
@@ -76,145 +289,148 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
   // Async render
   (async () => {
     const tmpOutput = `/tmp/render_${renderId}.mp4`;
-    let browser;
+    const specPath = `/tmp/composition_${renderId}.json`;
+    const reportProgress = createProgressReporter(
+      renderRequest.callbackUrl,
+      renderRequest.callbackHeaders,
+      renderRequest.jobId,
+    );
+
+    let browser = null;
+
     try {
-      // Report progress
-      await reportProgress(callback_url, callback_headers, job_id, 0);
+      await reportProgress(0);
 
       const bundleUrl = await getBundleUrl();
 
       browser = await openBrowser("chrome", {
-        browserExecutable: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
+        browserExecutable:
+          process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
         chromiumOptions: {
           args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
         },
         chromeMode: "chrome-for-testing",
       });
 
-      // Write composition spec to a temp file the component can read
-      const specPath = `/tmp/composition_${renderId}.json`;
-      fs.writeFileSync(specPath, JSON.stringify(compositionSpec));
+      fs.writeFileSync(specPath, JSON.stringify(renderRequest.specData, null, 2));
 
-      // Select the composition with input props
-      const comp = await selectComposition({
-        serveUrl: bundleUrl,
-        id: "FullComposition",
-        puppeteerInstance: browser,
-        inputProps: {
-          specPath: specPath,
-          specData: compositionSpec,
-        },
-      });
+      const inputProps = buildInputProps(renderRequest.specData, specPath);
 
-      // --- Override composition dimensions from the payload ---
-      if (compositionSpec.width) comp.width = compositionSpec.width;
-      if (compositionSpec.height) comp.height = compositionSpec.height;
-      if (compositionSpec.fps) comp.fps = compositionSpec.fps;
-      if (compositionSpec.durationInFrames) comp.durationInFrames = compositionSpec.durationInFrames;
+      const { composition: selectedComposition, compositionId } =
+        await selectCompositionWithFallback({
+          serveUrl: bundleUrl,
+          puppeteerInstance: browser,
+          inputProps,
+          compositionCandidates: renderRequest.compositionCandidates,
+        });
 
-      console.log(`[render] Job ${job_id} — ${comp.width}x${comp.height} @ ${comp.fps}fps, ${comp.durationInFrames} frames`);
+      const renderComposition = {
+        ...selectedComposition,
+        width: renderRequest.width,
+        height: renderRequest.height,
+        fps: renderRequest.fps,
+        durationInFrames: renderRequest.durationInFrames,
+      };
 
-      await reportProgress(callback_url, callback_headers, job_id, 10);
+      console.log(
+        `[render] Job ${renderRequest.jobId}: composition="${compositionId}" ` +
+          `${renderComposition.width}x${renderComposition.height} @ ${renderComposition.fps}fps ` +
+          `for ${renderComposition.durationInFrames} frames`,
+      );
 
-      // Render
+      console.log(
+        `[render] Job ${renderRequest.jobId}: scenes=${renderRequest.sceneCount}, ` +
+          `captions=${renderRequest.captionCount}, ` +
+          `overlays=${renderRequest.overlayKeys.length ? renderRequest.overlayKeys.join(",") : "none"}, ` +
+          `music=${renderRequest.hasMusic ? "yes" : "no"}`,
+      );
+
+      await reportProgress(10);
+
       await renderMedia({
-        composition: comp,
+        composition: renderComposition,
         serveUrl: bundleUrl,
         codec: "h264",
+        audioCodec: "aac",
         outputLocation: tmpOutput,
         puppeteerInstance: browser,
         concurrency: 1,
-        inputProps: {
-          specPath: specPath,
-          specData: compositionSpec,
-        },
+        muted: false,
+        inputProps,
         onProgress: async ({ progress }) => {
           const pct = Math.round(10 + progress * 80); // 10-90%
-          await reportProgress(callback_url, callback_headers, job_id, pct);
+          await reportProgress(pct);
         },
       });
 
       await browser.close({ silent: false });
       browser = null;
 
-      // Clean up spec file
-      fs.unlinkSync(specPath);
+      await reportProgress(92);
 
-      await reportProgress(callback_url, callback_headers, job_id, 90);
+      const fileBuffer = fs.readFileSync(tmpOutput);
+      const uploadResp = await fetch(renderRequest.storageUpload.signedUrl, {
+        method: "PUT",
+        headers: { "Content-Type": "video/mp4" },
+        body: fileBuffer,
+      });
 
-      // Upload to storage via signed URL
-      if (storage_upload?.signed_url) {
-        const fileBuffer = fs.readFileSync(tmpOutput);
-        const uploadResp = await fetch(storage_upload.signed_url, {
-          method: "PUT",
-          headers: { "Content-Type": "video/mp4" },
-          body: fileBuffer,
-        });
-        if (!uploadResp.ok) {
-          throw new Error(`Upload failed: ${uploadResp.status} ${await uploadResp.text()}`);
-        }
-        console.log(`[render] Uploaded ${output_path} (${(fileBuffer.length / 1024 / 1024).toFixed(1)}MB)`);
+      if (!uploadResp.ok) {
+        throw new Error(
+          `Upload failed: ${uploadResp.status} ${await uploadResp.text()}`,
+        );
       }
 
-      // Clean up temp file
-      if (fs.existsSync(tmpOutput)) fs.unlinkSync(tmpOutput);
+      console.log(
+        `[render] Uploaded ${renderRequest.outputPath} ` +
+          `(${(fileBuffer.length / 1024 / 1024).toFixed(1)}MB)`,
+      );
 
-      // Callback: complete
-      if (callback_url) {
-        await fetch(callback_url, {
-          method: "POST",
-          headers: callback_headers || { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            job_id,
-            status: "complete",
-            render_id: renderId,
-            output_path,
-            duration_ms: Date.now() - startTime,
-          }),
-        });
-      }
+      await reportProgress(100);
 
-      console.log(`[render] Job ${job_id} complete in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+      await postCallback(renderRequest.callbackUrl, renderRequest.callbackHeaders, {
+        job_id: renderRequest.jobId,
+        status: "complete",
+        render_id: renderId,
+        output_path: renderRequest.outputPath,
+        duration_ms: Date.now() - startTime,
+      });
+
+      console.log(
+        `[render] Job ${renderRequest.jobId} complete in ${(
+          (Date.now() - startTime) /
+          1000
+        ).toFixed(1)}s`,
+      );
     } catch (err) {
-      console.error(`[render] Job ${job_id} failed:`, err);
-      if (browser) await browser.close({ silent: false }).catch(() => {});
-      if (fs.existsSync(tmpOutput)) fs.unlinkSync(tmpOutput);
+      const errorMessage = err?.message || "Unknown render error";
+      console.error(`[render] Job ${renderRequest.jobId} failed:`, err);
 
-      // Callback: error
-      if (callback_url) {
-        await fetch(callback_url, {
-          method: "POST",
-          headers: callback_headers || { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            job_id,
-            status: "error",
-            error: err.message || "Unknown render error",
-          }),
+      try {
+        await postCallback(renderRequest.callbackUrl, renderRequest.callbackHeaders, {
+          job_id: renderRequest.jobId,
+          status: "error",
+          error: errorMessage,
         });
+      } catch (_callbackErr) {
+        // Non-fatal
       }
+    } finally {
+      if (browser) {
+        await browser.close({ silent: false }).catch(() => {});
+      }
+      safeUnlink(specPath);
+      safeUnlink(tmpOutput);
     }
   })();
 });
 
 // ---------- Legacy overlay endpoint ----------
-app.post("/render-overlay", authMiddleware, async (req, res) => {
+app.post("/render-overlay", authMiddleware, async (_req, res) => {
   res.json({ render_id: crypto.randomUUID(), status: "legacy_overlay_accepted" });
 });
 
-// ---------- Helpers ----------
-async function reportProgress(callbackUrl, headers, jobId, progress) {
-  if (!callbackUrl) return;
-  try {
-    await fetch(callbackUrl, {
-      method: "POST",
-      headers: headers || { "Content-Type": "application/json" },
-      body: JSON.stringify({ job_id: jobId, status: "processing", progress }),
-    });
-  } catch (e) {
-    // Non-fatal
-  }
-}
-
+// ---------- Start server ----------
 app.listen(PORT, () => {
   console.log(`Remotion Composition Service running on port ${PORT}`);
 });
