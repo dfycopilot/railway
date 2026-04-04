@@ -159,7 +159,7 @@ const SceneRenderer: React.FC<{
     case "video_segment": {
       const segment = (
         <VideoSegment
-          src={videoSrc}
+         videoUrl={videoSrc}
           trimStart={scene.trim_start}
           trimEnd={scene.trim_end}
           effects={scene.effects}
