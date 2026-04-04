@@ -138,7 +138,7 @@ export const FullComposition: React.FC<Props> = ({ specData }) => {
       )}
 
       {/* Layer 5: Legacy/generic overlays (if your Overlays component handles other stuff) */}
-      <Overlays overlays={overlays} />
+      <Overlays config={overlays} />
 
       {/* Layer 6: Music */}
       {music?.url && <MusicTrack url={music.url} volume={music.volume ?? 0.15} />}
