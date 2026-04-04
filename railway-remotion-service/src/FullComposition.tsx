@@ -185,7 +185,7 @@ const SceneRenderer: React.FC<{
     case "broll": {
       const broll = (
         <BrollInsert
-          src={scene.video_url}
+       videoUrl={scene.video_url}
           effects={scene.effects}
           fps={fps}
         />
