@@ -31,9 +31,253 @@ function authMiddleware(req, res, next) {
   next();
 }
 
+// ---------- Number sanitizers ----------
+function toFiniteNumber(value, fallback) {
+  const num = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function toPositiveInt(value, fallback) {
+  const num = Math.round(toFiniteNumber(value, fallback));
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
+
+function toNonNegativeInt(value, fallback = 0) {
+  const num = Math.round(toFiniteNumber(value, fallback));
+  return Number.isFinite(num) && num >= 0 ? num : fallback;
+}
+
+function dedupe(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+// Recursively sanitize common timing keys so Remotion never receives NaN.
+function sanitizeTimingKeysDeep(input) {
+  if (Array.isArray(input)) {
+    return input.map(sanitizeTimingKeysDeep);
+  }
+
+  if (!input || typeof input !== "object") {
+    return input;
+  }
+
+  const out = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value && typeof value === "object") {
+      out[key] = sanitizeTimingKeysDeep(value);
+      continue;
+    }
+
+    switch (key) {
+      case "start_frame":
+      case "startFrame":
+      case "at_frame":
+      case "atFrame":
+      case "frame":
+      case "from":
+      case "offset":
+      case "delay":
+        out[key] = toNonNegativeInt(value, 0);
+        break;
+
+      case "duration_frames":
+      case "durationFrames":
+        out[key] = toPositiveInt(value, 30);
+        break;
+
+      case "trim_start":
+      case "trimStart":
+        out[key] = toFiniteNumber(value, 0);
+        break;
+
+      case "trim_end":
+      case "trimEnd":
+        out[key] = toFiniteNumber(value, 1);
+        break;
+
+      case "start":
+        out[key] = toFiniteNumber(value, 0);
+        break;
+
+      case "end":
+      case "to":
+        out[key] = toFiniteNumber(value, 0.5);
+        break;
+
+      case "fps":
+        out[key] = toPositiveInt(value, 30);
+        break;
+
+      case "width":
+        out[key] = toPositiveInt(value, 1920);
+        break;
+
+      case "height":
+        out[key] = toPositiveInt(value, 1080);
+        break;
+
+      case "durationInFrames":
+        out[key] = toPositiveInt(value, 900);
+        break;
+
+      default:
+        out[key] = value;
+    }
+  }
+
+  return out;
+}
+
+function sanitizeScene(scene, fps) {
+  const startFrame = toNonNegativeInt(scene?.start_frame ?? scene?.startFrame, 0);
+  const durationFrames = toPositiveInt(scene?.duration_frames ?? scene?.durationFrames, 30);
+  const trimStart = toFiniteNumber(scene?.trim_start ?? scene?.trimStart, 0);
+
+  let trimEnd = scene?.trim_end ?? scene?.trimEnd;
+  trimEnd =
+    trimEnd === undefined || trimEnd === null
+      ? trimStart + durationFrames / fps
+      : toFiniteNumber(trimEnd, trimStart + durationFrames / fps);
+
+  if (trimEnd <= trimStart) {
+    trimEnd = trimStart + durationFrames / fps;
+  }
+
+  return {
+    ...scene,
+    start_frame: startFrame,
+    startFrame,
+    duration_frames: durationFrames,
+    durationFrames,
+    trim_start: trimStart,
+    trimStart,
+    trim_end: trimEnd,
+    trimEnd,
+  };
+}
+
+function sanitizeCaption(caption) {
+  const start = toFiniteNumber(caption?.start, 0);
+  let end = toFiniteNumber(caption?.end, start + 0.5);
+  if (end <= start) end = start + 0.5;
+
+  const startFrame =
+    caption?.start_frame !== undefined || caption?.startFrame !== undefined
+      ? toNonNegativeInt(caption?.start_frame ?? caption?.startFrame, Math.round(start * 30))
+      : undefined;
+
+  const durationFrames =
+    caption?.duration_frames !== undefined || caption?.durationFrames !== undefined
+      ? toPositiveInt(
+          caption?.duration_frames ?? caption?.durationFrames,
+          Math.max(1, Math.round((end - start) * 30)),
+        )
+      : undefined;
+
+  return {
+    ...caption,
+    start,
+    end,
+    ...(startFrame !== undefined
+      ? { start_frame: startFrame, startFrame }
+      : {}),
+    ...(durationFrames !== undefined
+      ? { duration_frames: durationFrames, durationFrames }
+      : {}),
+  };
+}
+
+function sanitizeTextAnimation(animation) {
+  const startFrame = toNonNegativeInt(animation?.start_frame ?? animation?.startFrame, 0);
+  const durationFrames = toPositiveInt(animation?.duration_frames ?? animation?.durationFrames, 30);
+
+  return {
+    ...animation,
+    start_frame: startFrame,
+    startFrame,
+    duration_frames: durationFrames,
+    durationFrames,
+  };
+}
+
+function sanitizeTransition(transition) {
+  const atFrame = toNonNegativeInt(transition?.at_frame ?? transition?.atFrame, 0);
+  const durationFrames = toPositiveInt(transition?.duration_frames ?? transition?.durationFrames, 15);
+
+  return {
+    ...transition,
+    at_frame: atFrame,
+    atFrame,
+    duration_frames: durationFrames,
+    durationFrames,
+  };
+}
+
+function sanitizeSpecData(rawSpecData, fps) {
+  const base = sanitizeTimingKeysDeep(rawSpecData || {});
+
+  const scenes = Array.isArray(base.scenes) ? base.scenes.map((scene) => sanitizeScene(scene, fps)) : [];
+  const captions = Array.isArray(base.captions) ? base.captions.map(sanitizeCaption) : [];
+  const textAnimations = Array.isArray(base.text_animations)
+    ? base.text_animations.map(sanitizeTextAnimation)
+    : [];
+  const transitions = Array.isArray(base.transitions)
+    ? base.transitions.map(sanitizeTransition)
+    : [];
+
+  return {
+    ...base,
+    scenes,
+    captions,
+    text_animations: textAnimations,
+    transitions,
+  };
+}
+
+// ---------- Payload extraction ----------
+function extractSpecData(body) {
+  if (body?.input_props?.specData && typeof body.input_props.specData === "object") {
+    return body.input_props.specData;
+  }
+  if (body?.inputProps?.specData && typeof body.inputProps.specData === "object") {
+    return body.inputProps.specData;
+  }
+  if (body?.props?.specData && typeof body.props.specData === "object") {
+    return body.props.specData;
+  }
+  if (body?.specData && typeof body.specData === "object") {
+    return body.specData;
+  }
+  if (body?.spec_data && typeof body.spec_data === "object") {
+    return body.spec_data;
+  }
+  if (body?.composition && typeof body.composition === "object") {
+    if (body.composition.specData && typeof body.composition.specData === "object") {
+      return body.composition.specData;
+    }
+    if (Array.isArray(body.composition.scenes)) {
+      return body.composition;
+    }
+  }
+  if (Array.isArray(body?.scenes)) {
+    return body;
+  }
+
+  return null;
+}
+
+function getCompositionIds(body) {
+  return dedupe([
+    typeof body?.composition === "string" ? body.composition : null,
+    typeof body?.compositionId === "string" ? body.compositionId : null,
+    "main",
+    "FullComposition",
+  ]);
+}
+
 // ---------- Health ----------
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "remotion-composition", version: "1.2.0" });
+  res.json({ status: "ok", service: "remotion-composition", version: "2.0.0" });
 });
 
 // ---------- Bundle cache ----------
@@ -53,302 +297,122 @@ async function getBundleUrl() {
 // Pre-bundle on startup
 getBundleUrl().catch((e) => console.error("[bundle] Pre-bundle failed:", e));
 
-// ---------- Helpers ----------
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function firstString(...values) {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-  return null;
-}
-
-function firstObject(...values) {
-  for (const value of values) {
-    if (isPlainObject(value)) {
-      return value;
-    }
-  }
-  return null;
-}
-
-function firstPositiveInt(...values) {
-  for (const value of values) {
-    const num = Number(value);
-    if (Number.isFinite(num) && num > 0) {
-      return Math.round(num);
-    }
-  }
-  return null;
-}
-
-function safeUnlink(filePath) {
-  try {
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-  } catch (e) {
-    console.warn(`[cleanup] Failed to remove ${filePath}:`, e?.message || e);
-  }
-}
-
-function buildInputProps(specData, specPath) {
-  return {
-    specData,
-    spec_data: specData,
-    compositionSpec: specData,
-    specPath,
-  };
-}
-
-function summarizeSpec(specData) {
-  const sceneCount = Array.isArray(specData?.scenes) ? specData.scenes.length : 0;
-  const captionCount = Array.isArray(specData?.captions) ? specData.captions.length : 0;
-  const overlayKeys = isPlainObject(specData?.overlays) ? Object.keys(specData.overlays) : [];
-  const hasMusic = Boolean(
-    firstString(
-      specData?.music?.url,
-      specData?.music?.src,
-      specData?.music_url,
-      specData?.musicUrl,
-    ),
-  );
-
-  return {
-    sceneCount,
-    captionCount,
-    overlayKeys,
-    hasMusic,
-  };
-}
-
-function resolveRenderRequest(body = {}) {
-  const inputPropContainer =
-    firstObject(body.input_props, body.inputProps, body.props) || {};
-
-  const rawSpecData =
-    firstObject(
-      body.specData,
-      body.spec_data,
-      inputPropContainer.specData,
-      inputPropContainer.spec_data,
-      inputPropContainer.compositionSpec,
-      isPlainObject(body.composition) ? body.composition : null,
-    ) || {};
-
-  const width = firstPositiveInt(body.width, rawSpecData.width) || 1920;
-  const height = firstPositiveInt(body.height, rawSpecData.height) || 1080;
-  const fps = firstPositiveInt(body.fps, rawSpecData.fps) || 30;
-  const durationInFrames =
-    firstPositiveInt(
-      body.durationInFrames,
-      body.duration_frames,
-      body.durationFrames,
-      rawSpecData.durationInFrames,
-      rawSpecData.duration_frames,
-      rawSpecData.durationFrames,
-    ) || 900;
-
-  const specData = {
-    ...rawSpecData,
-    width,
-    height,
-    fps,
-    durationInFrames,
-    duration_frames: durationInFrames,
-    durationFrames: durationInFrames,
-  };
-
-  const requestedCompositionId = firstString(
-    body.composition_id,
-    body.compositionId,
-    typeof body.composition === "string" ? body.composition : null,
-  );
-
-  const compositionCandidates = [
-    ...new Set(
-      [requestedCompositionId, "main", "FullComposition"].filter(Boolean),
-    ),
-  ];
-
-  const storageUpload = firstObject(body.storage_upload, body.storageUpload) || {};
-  const signedUrl = firstString(storageUpload.signed_url, storageUpload.signedUrl);
-  const outputPath = firstString(body.output_path, body.outputPath, storageUpload.path);
-  const callbackUrl = firstString(body.callback_url, body.callbackUrl);
-  const callbackHeaders = firstObject(body.callback_headers, body.callbackHeaders);
-
-  return {
-    jobId: firstString(body.job_id, body.jobId),
-    specData,
-    width,
-    height,
-    fps,
-    durationInFrames,
-    compositionCandidates,
-    storageUpload: {
-      ...storageUpload,
-      signedUrl,
-    },
-    outputPath,
-    callbackUrl,
-    callbackHeaders,
-    ...summarizeSpec(specData),
-  };
-}
-
-async function selectCompositionWithFallback({
-  serveUrl,
-  puppeteerInstance,
-  inputProps,
-  compositionCandidates,
-}) {
-  let lastError = null;
-
-  for (const id of compositionCandidates) {
-    try {
-      const composition = await selectComposition({
-        serveUrl,
-        id,
-        puppeteerInstance,
-        inputProps,
-      });
-      return { composition, compositionId: id };
-    } catch (error) {
-      lastError = error;
-      console.warn(
-        `[render] Composition "${id}" unavailable, trying next candidate:`,
-        error?.message || error,
-      );
-    }
-  }
-
-  throw lastError || new Error("No compatible Remotion composition found");
-}
-
-async function postCallback(callbackUrl, headers, payload) {
-  if (!callbackUrl) return;
-
-  await fetch(callbackUrl, {
-    method: "POST",
-    headers: headers || { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-function createProgressReporter(callbackUrl, headers, jobId) {
-  let lastProgress = null;
-
-  return async (progress) => {
-    if (!callbackUrl) return;
-
-    const normalized = Math.max(0, Math.min(100, Math.round(progress)));
-    if (normalized === lastProgress) return;
-    lastProgress = normalized;
-
-    try {
-      await postCallback(callbackUrl, headers, {
-        job_id: jobId,
-        status: "processing",
-        progress: normalized,
-      });
-    } catch (_e) {
-      // Non-fatal
-    }
-  };
-}
-
 // ---------- POST /render-composition ----------
 app.post("/render-composition", authMiddleware, async (req, res) => {
   const startTime = Date.now();
   const renderId = crypto.randomUUID();
-  const renderRequest = resolveRenderRequest(req.body);
+  const body = req.body || {};
 
-  if (!renderRequest.jobId) {
-    return res.status(400).json({ error: "job_id is required" });
+  const job_id = body.job_id || body.jobId;
+  const rawSpecData = extractSpecData(body);
+  const storage_upload = body.storage_upload || body.storageUpload;
+  const output_path = body.output_path || body.outputPath;
+  const callback_url = body.callback_url || body.callbackUrl;
+  const callback_headers = body.callback_headers || body.callbackHeaders;
+
+  if (!job_id || !rawSpecData) {
+    return res.status(400).json({ error: "job_id and specData are required" });
   }
 
-  if (!isPlainObject(renderRequest.specData) || Object.keys(renderRequest.specData).length === 0) {
-    return res.status(400).json({
-      error: "No composition spec found. Expected input_props.specData (or equivalent).",
-    });
-  }
+  const fps = toPositiveInt(body.fps ?? rawSpecData.fps, 30);
+  const width = toPositiveInt(body.width ?? rawSpecData.width, 1920);
+  const height = toPositiveInt(body.height ?? rawSpecData.height, 1080);
+  const durationInFrames = toPositiveInt(
+    body.durationInFrames ?? body.duration_frames ?? rawSpecData.durationInFrames ?? rawSpecData.duration_frames,
+    900,
+  );
 
-  if (!renderRequest.storageUpload?.signedUrl || !renderRequest.outputPath) {
-    return res.status(400).json({
-      error: "Missing storage_upload.signed_url or output_path",
-    });
-  }
+  const specData = sanitizeSpecData(rawSpecData, fps);
+
+  console.log("[render] Incoming payload summary:", {
+    job_id,
+    composition_ids: getCompositionIds(body),
+    width,
+    height,
+    fps,
+    durationInFrames,
+    scene_count: specData.scenes?.length ?? 0,
+    caption_count: specData.captions?.length ?? 0,
+    text_animation_count: specData.text_animations?.length ?? 0,
+    transition_count: specData.transitions?.length ?? 0,
+    overlay_keys: Object.keys(specData.overlays || {}),
+    has_music: Boolean(specData.music),
+    has_source_video_url: Boolean(specData.source_video_url),
+  });
 
   // Respond immediately — rendering happens async
   res.json({ render_id: renderId, status: "rendering" });
 
-  // Async render
   (async () => {
     const tmpOutput = `/tmp/render_${renderId}.mp4`;
     const specPath = `/tmp/composition_${renderId}.json`;
-    const reportProgress = createProgressReporter(
-      renderRequest.callbackUrl,
-      renderRequest.callbackHeaders,
-      renderRequest.jobId,
-    );
-
     let browser = null;
 
     try {
-      await reportProgress(0);
+      await reportProgress(callback_url, callback_headers, job_id, 0);
 
       const bundleUrl = await getBundleUrl();
 
       browser = await openBrowser("chrome", {
-        browserExecutable:
-          process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
+        browserExecutable: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
         chromiumOptions: {
           args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
         },
         chromeMode: "chrome-for-testing",
       });
 
-      fs.writeFileSync(specPath, JSON.stringify(renderRequest.specData, null, 2));
+      fs.writeFileSync(specPath, JSON.stringify(specData, null, 2));
 
-      const inputProps = buildInputProps(renderRequest.specData, specPath);
-
-      const { composition: selectedComposition, compositionId } =
-        await selectCompositionWithFallback({
-          serveUrl: bundleUrl,
-          puppeteerInstance: browser,
-          inputProps,
-          compositionCandidates: renderRequest.compositionCandidates,
-        });
-
-      const renderComposition = {
-        ...selectedComposition,
-        width: renderRequest.width,
-        height: renderRequest.height,
-        fps: renderRequest.fps,
-        durationInFrames: renderRequest.durationInFrames,
+      const inputProps = {
+        specData,
+        specPath,
       };
 
-      console.log(
-        `[render] Job ${renderRequest.jobId}: composition="${compositionId}" ` +
-          `${renderComposition.width}x${renderComposition.height} @ ${renderComposition.fps}fps ` +
-          `for ${renderComposition.durationInFrames} frames`,
-      );
+      const compositionIds = getCompositionIds(body);
+      let comp = null;
+      let selectedId = null;
 
-      console.log(
-        `[render] Job ${renderRequest.jobId}: scenes=${renderRequest.sceneCount}, ` +
-          `captions=${renderRequest.captionCount}, ` +
-          `overlays=${renderRequest.overlayKeys.length ? renderRequest.overlayKeys.join(",") : "none"}, ` +
-          `music=${renderRequest.hasMusic ? "yes" : "no"}`,
-      );
+      for (const id of compositionIds) {
+        try {
+          comp = await selectComposition({
+            serveUrl: bundleUrl,
+            id,
+            puppeteerInstance: browser,
+            inputProps,
+          });
+          selectedId = id;
+          break;
+        } catch (err) {
+          console.warn(`[render] Could not select composition "${id}": ${err?.message || err}`);
+        }
+      }
 
-      await reportProgress(10);
+      if (!comp) {
+        throw new Error(`No composition found. Tried: ${compositionIds.join(", ")}`);
+      }
+
+      // Force the composition dimensions/timing from payload so landscape jobs
+      // do not render with the default portrait composition config.
+      comp = {
+        ...comp,
+        width,
+        height,
+        fps,
+        durationInFrames,
+      };
+
+      console.log("[render] Selected composition:", {
+        compositionId: selectedId,
+        width: comp.width,
+        height: comp.height,
+        fps: comp.fps,
+        durationInFrames: comp.durationInFrames,
+      });
+
+      await reportProgress(callback_url, callback_headers, job_id, 10);
 
       await renderMedia({
-        composition: renderComposition,
+        composition: comp,
         serveUrl: bundleUrl,
         codec: "h264",
         audioCodec: "aac",
@@ -358,69 +422,100 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
         muted: false,
         inputProps,
         onProgress: async ({ progress }) => {
-          const pct = Math.round(10 + progress * 80); // 10-90%
-          await reportProgress(pct);
+          const pct = Math.round(10 + progress * 80);
+          await reportProgress(callback_url, callback_headers, job_id, pct);
         },
       });
 
       await browser.close({ silent: false });
       browser = null;
 
-      await reportProgress(92);
+      if (fs.existsSync(specPath)) {
+        fs.unlinkSync(specPath);
+      }
 
-      const fileBuffer = fs.readFileSync(tmpOutput);
-      const uploadResp = await fetch(renderRequest.storageUpload.signedUrl, {
-        method: "PUT",
-        headers: { "Content-Type": "video/mp4" },
-        body: fileBuffer,
-      });
+      await reportProgress(callback_url, callback_headers, job_id, 90);
 
-      if (!uploadResp.ok) {
-        throw new Error(
-          `Upload failed: ${uploadResp.status} ${await uploadResp.text()}`,
+      // Upload to storage via signed URL
+      const signedUrl = storage_upload?.signed_url || storage_upload?.signedUrl;
+      if (signedUrl) {
+        const fileBuffer = fs.readFileSync(tmpOutput);
+        const uploadResp = await fetch(signedUrl, {
+          method: "PUT",
+          headers: { "Content-Type": "video/mp4" },
+          body: fileBuffer,
+        });
+
+        if (!uploadResp.ok) {
+          throw new Error(`Upload failed: ${uploadResp.status} ${await uploadResp.text()}`);
+        }
+
+        console.log(
+          `[render] Uploaded ${output_path || "(no output_path provided)"} (${(
+            fileBuffer.length /
+            1024 /
+            1024
+          ).toFixed(1)}MB)`,
         );
       }
 
-      console.log(
-        `[render] Uploaded ${renderRequest.outputPath} ` +
-          `(${(fileBuffer.length / 1024 / 1024).toFixed(1)}MB)`,
-      );
+      if (fs.existsSync(tmpOutput)) {
+        fs.unlinkSync(tmpOutput);
+      }
 
-      await reportProgress(100);
-
-      await postCallback(renderRequest.callbackUrl, renderRequest.callbackHeaders, {
-        job_id: renderRequest.jobId,
-        status: "complete",
-        render_id: renderId,
-        output_path: renderRequest.outputPath,
-        duration_ms: Date.now() - startTime,
-      });
-
-      console.log(
-        `[render] Job ${renderRequest.jobId} complete in ${(
-          (Date.now() - startTime) /
-          1000
-        ).toFixed(1)}s`,
-      );
-    } catch (err) {
-      const errorMessage = err?.message || "Unknown render error";
-      console.error(`[render] Job ${renderRequest.jobId} failed:`, err);
-
-      try {
-        await postCallback(renderRequest.callbackUrl, renderRequest.callbackHeaders, {
-          job_id: renderRequest.jobId,
-          status: "error",
-          error: errorMessage,
+      // Callback: complete
+      if (callback_url) {
+        await fetch(callback_url, {
+          method: "POST",
+          headers: callback_headers || { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            job_id,
+            status: "complete",
+            render_id: renderId,
+            output_path,
+            duration_ms: Date.now() - startTime,
+          }),
         });
-      } catch (_callbackErr) {
-        // Non-fatal
       }
-    } finally {
+
+      console.log(`[render] Job ${job_id} complete in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+    } catch (err) {
+      console.error(`[render] Job ${job_id} failed:`, err);
+
       if (browser) {
-        await browser.close({ silent: false }).catch(() => {});
+        try {
+          await browser.close({ silent: false });
+        } catch (_) {}
       }
-      safeUnlink(specPath);
-      safeUnlink(tmpOutput);
+
+      if (fs.existsSync(tmpOutput)) {
+        try {
+          fs.unlinkSync(tmpOutput);
+        } catch (_) {}
+      }
+
+      if (fs.existsSync(specPath)) {
+        try {
+          fs.unlinkSync(specPath);
+        } catch (_) {}
+      }
+
+      // Callback: error
+      if (callback_url) {
+        try {
+          await fetch(callback_url, {
+            method: "POST",
+            headers: callback_headers || { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              job_id,
+              status: "error",
+              error: err?.message || "Unknown render error",
+            }),
+          });
+        } catch (callbackErr) {
+          console.error("[render] Error callback failed:", callbackErr);
+        }
+      }
     }
   })();
 });
@@ -430,7 +525,20 @@ app.post("/render-overlay", authMiddleware, async (_req, res) => {
   res.json({ render_id: crypto.randomUUID(), status: "legacy_overlay_accepted" });
 });
 
-// ---------- Start server ----------
+// ---------- Helpers ----------
+async function reportProgress(callbackUrl, headers, jobId, progress) {
+  if (!callbackUrl) return;
+  try {
+    await fetch(callbackUrl, {
+      method: "POST",
+      headers: headers || { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: jobId, status: "processing", progress }),
+    });
+  } catch (_) {
+    // Non-fatal
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Remotion Composition Service running on port ${PORT}`);
 });
