@@ -33,7 +33,7 @@ function authMiddleware(req, res, next) {
 
 // ---------- Health ----------
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "remotion-composition", version: "1.0.0" });
+  res.json({ status: "ok", service: "remotion-composition", version: "1.1.0" });
 });
 
 // ---------- Bundle cache ----------
@@ -105,6 +105,14 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
           specData: compositionSpec,
         },
       });
+
+      // --- Override composition dimensions from the payload ---
+      if (compositionSpec.width) comp.width = compositionSpec.width;
+      if (compositionSpec.height) comp.height = compositionSpec.height;
+      if (compositionSpec.fps) comp.fps = compositionSpec.fps;
+      if (compositionSpec.durationInFrames) comp.durationInFrames = compositionSpec.durationInFrames;
+
+      console.log(`[render] Job ${job_id} — ${comp.width}x${comp.height} @ ${comp.fps}fps, ${comp.durationInFrames} frames`);
 
       await reportProgress(callback_url, callback_headers, job_id, 10);
 
@@ -190,10 +198,7 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
 
 // ---------- Legacy overlay endpoint ----------
 app.post("/render-overlay", authMiddleware, async (req, res) => {
-  // Kept for backwards compatibility — delegates to same render pipeline
-  // but with mode: "overlay" and transparent background
   res.json({ render_id: crypto.randomUUID(), status: "legacy_overlay_accepted" });
-  // TODO: implement overlay-only rendering if needed
 });
 
 // ---------- Helpers ----------
