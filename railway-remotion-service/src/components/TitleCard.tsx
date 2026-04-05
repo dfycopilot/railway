@@ -10,22 +10,16 @@ interface TitleCardProps {
   title: string;
   subtitle?: string;
   animation?: string;
-  fps: number;
 }
 
-/**
- * Animated title/subtitle card with multiple animation styles.
- */
 export const TitleCard: React.FC<TitleCardProps> = ({
   title,
   subtitle,
   animation = "slam_in",
-  fps,
 }) => {
   const frame = useCurrentFrame();
-  const { durationInFrames } = useVideoConfig();
+  const { fps, durationInFrames } = useVideoConfig();
 
-  // Exit animation (fade out last 15 frames)
   const exitOpacity = interpolate(
     frame,
     [durationInFrames - 15, durationInFrames],
@@ -72,39 +66,13 @@ export const TitleCard: React.FC<TitleCardProps> = ({
   const anim = getAnimation();
 
   return (
-    <AbsoluteFill
-      style={{
-        justifyContent: "center",
-        alignItems: "center",
-        background: "radial-gradient(ellipse at center, rgba(0,0,0,0.8) 0%, rgba(0,0,0,0.95) 100%)",
-        opacity: exitOpacity,
-      }}
-    >
+    <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", opacity: exitOpacity }}>
       <div style={{ textAlign: "center", ...anim }}>
-        <div
-          style={{
-            fontFamily: oswaldFamily,
-            fontSize: 96,
-            fontWeight: 700,
-            color: "white",
-            textTransform: "uppercase",
-            letterSpacing: 4,
-            lineHeight: 1.1,
-            padding: "0 60px",
-          }}
-        >
+        <div style={{ fontFamily: oswaldFamily, fontSize: 72, color: "white", textShadow: "0 4px 20px rgba(0,0,0,0.7)" }}>
           {title}
         </div>
         {subtitle && (
-          <div
-            style={{
-              fontFamily: interFamily,
-              fontSize: 36,
-              fontWeight: 400,
-              color: "rgba(255,255,255,0.7)",
-              marginTop: 20,
-            }}
-          >
+          <div style={{ fontFamily: interFamily, fontSize: 32, color: "rgba(255,255,255,0.85)", marginTop: 16, textShadow: "0 2px 10px rgba(0,0,0,0.5)" }}>
             {subtitle}
           </div>
         )}
