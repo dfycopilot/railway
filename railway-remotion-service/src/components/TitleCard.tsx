@@ -10,19 +10,33 @@ interface TitleCardProps {
   title: string;
   subtitle?: string;
   animation?: string;
+  /**
+   * Frame count of the parent Sequence so the exit fade triggers in the right
+   * place. Without this, exit interpolates over the entire composition and
+   * never fades the title out (or fades it the wrong amount).
+   */
+  durationFrames?: number;
 }
 
 export const TitleCard: React.FC<TitleCardProps> = ({
   title,
   subtitle,
   animation = "slam_in",
+  durationFrames,
 }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
+  const { fps, durationInFrames: compDuration } = useVideoConfig();
+
+  const sceneDur = Math.max(
+    1,
+    Number.isFinite(durationFrames) && (durationFrames as number) > 0
+      ? (durationFrames as number)
+      : compDuration
+  );
 
   const exitOpacity = interpolate(
     frame,
-    [durationInFrames - 15, durationInFrames],
+    [Math.max(0, sceneDur - 15), sceneDur],
     [1, 0],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );

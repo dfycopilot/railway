@@ -2,6 +2,7 @@
  * KineticText — Bold animated display text.
  * Supports: slam_in, slide_up, typewriter, glitch_reveal, fade_reveal
  */
+import React from "react";
 import { useCurrentFrame, useVideoConfig, interpolate, spring } from "remotion";
 import { loadFont } from "@remotion/google-fonts/Oswald";
 
