@@ -77,65 +77,68 @@ interface PresetStyle {
   letter_spacing: string;
 }
 
+// Position values are now expressed as a fraction of total height (0..1) measured
+// from the BOTTOM. e.g. 0.18 = 18% of the height up from the bottom edge.
+// 0.18 lands the caption in the lower-third overlay zone (not glued to the edge).
 const PRESETS: Record<string, PresetStyle> = {
   hormozi: {
     font_family: "'Oswald', 'Arial Black', 'Impact', sans-serif",
     font_weight: 700,
-    font_size_ratio: 0.055,
+    font_size_ratio: 0.048,
     text_transform: "uppercase",
     text_color: "#FFFFFF",
     highlight_color: "#FFD700",
     bg_style: "pill",
     bg_color: "rgba(0,0,0,0.75)",
     position: "bottom",
-    broll_position: "center",
+    broll_position: "bottom",
     animation: "pop_in",
     word_by_word: true,
     max_words_per_chunk: 3,
-    safe_zone: { portrait_marginBottom: 400, landscape_marginBottom: 50, square_marginBottom: 100 },
+    safe_zone: { portrait_marginBottom: 0.20, landscape_marginBottom: 0.14, square_marginBottom: 0.16 },
     stroke_width: 2,
     letter_spacing: "0.02em",
   },
   cinematic: {
     font_family: "'Inter', 'Helvetica Neue', sans-serif",
     font_weight: 500,
-    font_size_ratio: 0.032,
+    font_size_ratio: 0.030,
     text_transform: "none",
     text_color: "#FFFFFF",
     highlight_color: "#E0E0E0",
     bg_style: "gradient",
     bg_color: "linear-gradient(transparent, rgba(0,0,0,0.8))",
     position: "bottom",
-    broll_position: "center",
+    broll_position: "bottom",
     animation: "fade",
     word_by_word: false,
     max_words_per_chunk: 5,
-    safe_zone: { portrait_marginBottom: 380, landscape_marginBottom: 50, square_marginBottom: 100 },
+    safe_zone: { portrait_marginBottom: 0.18, landscape_marginBottom: 0.12, square_marginBottom: 0.14 },
     stroke_width: 0,
     letter_spacing: "0.05em",
   },
   tiktok: {
     font_family: "'Montserrat', 'Arial Black', sans-serif",
     font_weight: 700,
-    font_size_ratio: 0.05,
+    font_size_ratio: 0.044,
     text_transform: "uppercase",
     text_color: "#FFFFFF",
     highlight_color: "#FF3B5C",
     bg_style: "none",
     bg_color: "transparent",
     position: "bottom",
-    broll_position: "center",
+    broll_position: "bottom",
     animation: "bounce",
     word_by_word: true,
     max_words_per_chunk: 3,
-    safe_zone: { portrait_marginBottom: 420, landscape_marginBottom: 50, square_marginBottom: 120 },
+    safe_zone: { portrait_marginBottom: 0.22, landscape_marginBottom: 0.14, square_marginBottom: 0.16 },
     stroke_width: 2,
     letter_spacing: "0.02em",
   },
   minimal: {
     font_family: "'Inter', 'Helvetica Neue', sans-serif",
     font_weight: 400,
-    font_size_ratio: 0.026,
+    font_size_ratio: 0.024,
     text_transform: "lowercase",
     text_color: "#F0F0F0",
     highlight_color: "#CCCCCC",
@@ -146,14 +149,14 @@ const PRESETS: Record<string, PresetStyle> = {
     animation: "fade",
     word_by_word: false,
     max_words_per_chunk: 6,
-    safe_zone: { portrait_marginBottom: 350, landscape_marginBottom: 40, square_marginBottom: 80 },
+    safe_zone: { portrait_marginBottom: 0.16, landscape_marginBottom: 0.10, square_marginBottom: 0.12 },
     stroke_width: 0,
     letter_spacing: "0.01em",
   },
   karaoke: {
     font_family: "'Bebas Neue', 'Arial Black', sans-serif",
     font_weight: 400,
-    font_size_ratio: 0.042,
+    font_size_ratio: 0.038,
     text_transform: "uppercase",
     text_color: "rgba(255,255,255,0.4)",
     highlight_color: "#00FF88",
@@ -164,7 +167,7 @@ const PRESETS: Record<string, PresetStyle> = {
     animation: "karaoke",
     word_by_word: true,
     max_words_per_chunk: 8,
-    safe_zone: { portrait_marginBottom: 380, landscape_marginBottom: 50, square_marginBottom: 100 },
+    safe_zone: { portrait_marginBottom: 0.18, landscape_marginBottom: 0.12, square_marginBottom: 0.14 },
     stroke_width: 0,
     letter_spacing: "0.04em",
   },
@@ -218,30 +221,32 @@ function getPositionStyles(
   safeZone: CaptionSafeZone,
   width: number,
   height: number,
-  bgStyle: string
+  _bgStyle: string
 ): React.CSSProperties {
   const aspect = getAspectCategory(width, height);
-  const marginBottom =
+  // safe_zone values are now fractions of total height (0..1) measured from bottom
+  const marginFraction =
     aspect === "portrait"
       ? safeZone.portrait_marginBottom
       : aspect === "square"
         ? safeZone.square_marginBottom
         : safeZone.landscape_marginBottom;
 
-  // Scale safe zone margins relative to actual height (designed for 1080x1920)
-  const refHeight = aspect === "portrait" ? 1920 : aspect === "square" ? 1080 : 1080;
-  const scaledMargin = Math.round((marginBottom / refHeight) * height);
+  const scaledMargin = Math.round(marginFraction * height);
 
+  // Constrain caption width so long words can never bleed off the screen edges.
+  // 78% wide with auto-wrap leaves a clean 11% gutter on each side.
   const base: React.CSSProperties = {
     position: "absolute",
     left: "50%",
-    width: "90%",
-    maxWidth: "90%",
+    width: "78%",
+    maxWidth: "78%",
     textAlign: "center",
   };
 
   switch (position) {
     case "center":
+      // Kept for backward-compat but no preset uses it now.
       return {
         ...base,
         top: "50%",
@@ -250,7 +255,7 @@ function getPositionStyles(
     case "top":
       return {
         ...base,
-        top: `${Math.round(scaledMargin * 0.3)}px`,
+        top: `${Math.round(height * 0.08)}px`,
         transform: "translateX(-50%)",
       };
     case "bottom_left":
@@ -260,8 +265,8 @@ function getPositionStyles(
         left: "5%",
         transform: "none",
         textAlign: "left",
-        width: "70%",
-        maxWidth: "70%",
+        width: "60%",
+        maxWidth: "60%",
       };
     case "bottom":
     default:
@@ -545,7 +550,11 @@ export const CaptionRenderer: React.FC<CaptionRendererProps> = ({
     presetStyle.bg_style
   );
 
-  const fontSize = Math.round(width * presetStyle.font_size_ratio);
+  // Scale font by the SHORTER dimension so landscape captions don't blow up
+  // (1920 wide × 0.05 = 96px was way too big). Using min(w,h) makes a 1080p
+  // landscape and a 1080p portrait render captions at the same visual weight.
+  const fontReference = Math.min(width, height);
+  const fontSize = Math.round(fontReference * presetStyle.font_size_ratio);
 
   const textStyles: React.CSSProperties = {
     fontFamily: presetStyle.font_family,
