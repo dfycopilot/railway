@@ -1,0 +1,39 @@
+# Core
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
+# PyTorch (CUDA 12.1)
+torch>=2.2.0
+torchvision>=0.17.0
+torchaudio>=2.2.0
+
+# EchoMimicV2 dependencies
+diffusers>=0.27.0
+transformers>=4.38.0
+accelerate>=0.27.0
+safetensors>=0.4.0
+einops>=0.7.0
+omegaconf>=2.3.0
+
+# Image / Video processing
+opencv-python-headless>=4.9.0
+Pillow>=10.0.0
+imageio>=2.34.0
+imageio-ffmpeg>=0.4.9
+numpy>=1.24.0
+scipy>=1.12.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# HuggingFace model download
+huggingface-hub>=0.21.0
+
+# HTTP client for callbacks
+httpx>=0.27.0
+
+# Utilities
+pydantic>=2.5.0
+tqdm>=4.66.0
