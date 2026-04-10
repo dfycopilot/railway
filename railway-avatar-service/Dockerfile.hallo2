@@ -9,7 +9,10 @@
 # RunPod's image isn't accessible from GitHub Actions
 FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
 
-WORKDIR /workspace
+# IMPORTANT: RunPod mounts a volume at /workspace which overwrites anything
+# the Docker image puts there. Use /app for our code and /app/hallo2 for the
+# model repo so nothing gets hidden by the volume mount.
+WORKDIR /app
 
 # ── System dependencies ──────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -81,17 +84,17 @@ RUN pip install --no-cache-dir \
     httpx
 
 # ── Clone Hallo2 ────────────────────────────────────────────────
-RUN cd /workspace && git clone https://github.com/fudan-generative-vision/hallo2.git
+RUN cd /app && git clone https://github.com/fudan-generative-vision/hallo2.git
 
 # ── Download ALL pretrained models ──────────────────────────────
 # Hallo2 core weights (~5GB)
-RUN cd /workspace/hallo2 && python -c "\
+RUN cd /app/hallo2 && python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('fudan-generative-ai/hallo2', local_dir='./pretrained_models'); \
 print('Hallo2 weights downloaded')"
 
 # Stable Diffusion v1.5 (config files only — skip large binaries already in Hallo2)
-RUN cd /workspace/hallo2 && python -c "\
+RUN cd /app/hallo2 && python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('stable-diffusion-v1-5/stable-diffusion-v1-5', \
     local_dir='./pretrained_models/stable-diffusion-v1-5', \
@@ -99,7 +102,7 @@ snapshot_download('stable-diffusion-v1-5/stable-diffusion-v1-5', \
 print('SD 1.5 config downloaded')"
 
 # SD 1.5 UNet + VAE weights (needed separately)
-RUN cd /workspace/hallo2 && python -c "\
+RUN cd /app/hallo2 && python -c "\
 from huggingface_hub import hf_hub_download; \
 hf_hub_download('stable-diffusion-v1-5/stable-diffusion-v1-5', \
     'unet/diffusion_pytorch_model.safetensors', \
@@ -110,14 +113,14 @@ hf_hub_download('stable-diffusion-v1-5/stable-diffusion-v1-5', \
 print('SD 1.5 UNet downloaded')"
 
 # SD VAE
-RUN cd /workspace/hallo2 && python -c "\
+RUN cd /app/hallo2 && python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('stabilityai/sd-vae-ft-mse', \
     local_dir='./pretrained_models/sd-vae-ft-mse'); \
 print('SD VAE downloaded')"
 
 # Wav2Vec2
-RUN cd /workspace/hallo2 && python -c "\
+RUN cd /app/hallo2 && python -c "\
 import os; os.makedirs('./pretrained_models/wav2vec', exist_ok=True); \
 from huggingface_hub import snapshot_download; \
 snapshot_download('facebook/wav2vec2-base-960h', \
@@ -125,11 +128,11 @@ snapshot_download('facebook/wav2vec2-base-960h', \
 print('Wav2Vec2 downloaded')"
 
 # ── Copy server files ───────────────────────────────────────────
-COPY server.py /workspace/server.py
-COPY utils.py /workspace/utils.py
+COPY server.py /app/server.py
+COPY utils.py /app/utils.py
 
 # ── Environment variables ───────────────────────────────────────
-ENV PYTHONPATH="/workspace/hallo2:${PYTHONPATH}"
+ENV PYTHONPATH="/app/hallo2:${PYTHONPATH}"
 ENV FFMPEG_PATH="/usr/bin"
 
 # ── Expose ports ────────────────────────────────────────────────
@@ -140,4 +143,4 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # ── Default command ─────────────────────────────────────────────
-CMD ["python", "/workspace/server.py"]
+CMD ["python", "/app/server.py"]
