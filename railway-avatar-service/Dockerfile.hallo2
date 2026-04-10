@@ -1,0 +1,141 @@
+# Hallo2 Avatar Service — GPU Docker Image for RunPod
+# Built on RunPod's PyTorch base with ALL dependencies pre-installed and pinned.
+# No pip installs needed at runtime — everything works out of the box.
+#
+# Build: docker build -f Dockerfile.hallo2 -t hallo2-avatar .
+# Run:   docker run --gpus all -p 8080:8080 hallo2-avatar
+
+FROM runpod/pytorch:2.4.1-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+WORKDIR /workspace
+
+# ── System dependencies ──────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+    git \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Pin critical packages FIRST to avoid version conflicts ───────
+# xformers 0.0.27.post2 is the ONLY version compatible with PyTorch 2.4.1
+# numpy must be <2 for cv2/onnxruntime compatibility
+# diffusers must be 0.27.x for EchoMimicV2/Hallo2 model loading
+RUN pip install --no-cache-dir \
+    numpy==1.26.4 \
+    xformers==0.0.27.post2 \
+    diffusers==0.27.2 \
+    transformers==4.40.2 \
+    accelerate==0.29.3 \
+    huggingface-hub==0.23.4 \
+    safetensors==0.4.3
+
+# ── ML / Vision dependencies ────────────────────────────────────
+RUN pip install --no-cache-dir \
+    einops \
+    omegaconf \
+    opencv-python-headless==4.9.0.80 \
+    mediapipe \
+    insightface==0.7.3 \
+    scikit-image \
+    scikit-learn \
+    albumentations
+
+# ── Audio dependencies ──────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    librosa \
+    soundfile \
+    pydub \
+    audio-separator==0.17.5 \
+    onnxruntime-gpu==1.17.1
+
+# ── Video dependencies ──────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    av \
+    moviepy==1.0.3 \
+    imageio \
+    imageio-ffmpeg
+
+# ── Misc utilities ──────────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    matplotlib \
+    scipy \
+    Pillow \
+    tqdm \
+    pyyaml \
+    icecream \
+    easydict \
+    prettytable
+
+# ── Server dependencies ─────────────────────────────────────────
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    python-multipart \
+    httpx
+
+# ── Clone Hallo2 ────────────────────────────────────────────────
+RUN cd /workspace && git clone https://github.com/fudan-generative-vision/hallo2.git
+
+# ── Download ALL pretrained models ──────────────────────────────
+# Hallo2 core weights (~5GB)
+RUN cd /workspace/hallo2 && python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('fudan-generative-ai/hallo2', local_dir='./pretrained_models'); \
+print('Hallo2 weights downloaded')"
+
+# Stable Diffusion v1.5 (config files only — skip large binaries already in Hallo2)
+RUN cd /workspace/hallo2 && python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('stable-diffusion-v1-5/stable-diffusion-v1-5', \
+    local_dir='./pretrained_models/stable-diffusion-v1-5', \
+    ignore_patterns=['*.bin', '*.safetensors', '*.ckpt', 'safety_checker/*']); \
+print('SD 1.5 config downloaded')"
+
+# SD 1.5 UNet + VAE weights (needed separately)
+RUN cd /workspace/hallo2 && python -c "\
+from huggingface_hub import hf_hub_download; \
+hf_hub_download('stable-diffusion-v1-5/stable-diffusion-v1-5', \
+    'unet/diffusion_pytorch_model.safetensors', \
+    local_dir='./pretrained_models/stable-diffusion-v1-5'); \
+hf_hub_download('stable-diffusion-v1-5/stable-diffusion-v1-5', \
+    'unet/config.json', \
+    local_dir='./pretrained_models/stable-diffusion-v1-5'); \
+print('SD 1.5 UNet downloaded')"
+
+# SD VAE
+RUN cd /workspace/hallo2 && python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('stabilityai/sd-vae-ft-mse', \
+    local_dir='./pretrained_models/sd-vae-ft-mse'); \
+print('SD VAE downloaded')"
+
+# Wav2Vec2
+RUN cd /workspace/hallo2 && python -c "\
+import os; os.makedirs('./pretrained_models/wav2vec', exist_ok=True); \
+from huggingface_hub import snapshot_download; \
+snapshot_download('facebook/wav2vec2-base-960h', \
+    local_dir='./pretrained_models/wav2vec/wav2vec2-base-960h'); \
+print('Wav2Vec2 downloaded')"
+
+# ── Copy server files ───────────────────────────────────────────
+COPY server.py /workspace/server.py
+COPY utils.py /workspace/utils.py
+
+# ── Environment variables ───────────────────────────────────────
+ENV PYTHONPATH="/workspace/hallo2:${PYTHONPATH}"
+ENV FFMPEG_PATH="/usr/bin"
+
+# ── Expose ports ────────────────────────────────────────────────
+EXPOSE 8080 8888
+
+# ── Health check ────────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# ── Default command ─────────────────────────────────────────────
+CMD ["python", "/workspace/server.py"]
