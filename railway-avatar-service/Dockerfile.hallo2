@@ -56,7 +56,7 @@ RUN pip install --no-cache-dir \
     soundfile \
     pydub \
     audio-separator==0.17.5 \
-    onnxruntime-gpu==1.17.1
+    onnxruntime-gpu==1.18.1
 
 # ── Video dependencies ──────────────────────────────────────────
 RUN pip install --no-cache-dir \
