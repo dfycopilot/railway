@@ -1,6 +1,6 @@
 """
-RunPod Serverless Handler for Thumbnail Service
-=================================================
+RunPod Serverless Handler for Thumbnail Service v2
+====================================================
 Wraps the thumbnail processing logic for RunPod's serverless infrastructure.
 RunPod Serverless calls handler(event) instead of HTTP endpoints.
 
