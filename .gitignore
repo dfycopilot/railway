@@ -1,1 +1,3 @@
 railway-remotion-service/node_modules/
+.DS_Store
+railway-remotion-service/package-lock.json

@@ -35,7 +35,8 @@ RUN pip install --no-cache-dir \
     onnxruntime-gpu==1.18.1 \
     insightface==0.7.3 \
     scikit-image==0.24.0 \
-    scipy==1.14.1
+    scipy==1.14.1 \
+    runpod==1.7.7
 
 # ── Clone LivePortrait ──────────────────────────────────────
 RUN git clone https://github.com/KwaiVGI/LivePortrait.git /app/LivePortrait
@@ -62,6 +63,7 @@ RUN mkdir -p /app/expressions
 
 # ── Copy server code ─────────────────────────────────────────
 COPY thumbnail_server.py /app/thumbnail_server.py
+COPY runpod_handler.py /app/runpod_handler.py
 
 # ── Expose port ──────────────────────────────────────────────
 EXPOSE 8080
@@ -71,4 +73,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \
     CMD python -c "import httpx; r = httpx.get('http://localhost:8080/health'); r.raise_for_status()" || exit 1
 
 # ── Run ──────────────────────────────────────────────────────
-CMD ["python", "/app/thumbnail_server.py"]
+# Use runpod_handler.py for RunPod Serverless (auto-scale to zero)
+# Use thumbnail_server.py for standalone/Pod deployment (always-on FastAPI)
+CMD ["python", "-u", "/app/runpod_handler.py"]
