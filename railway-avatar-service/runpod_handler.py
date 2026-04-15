@@ -64,15 +64,23 @@ def load_models():
         sys.path.insert(0, str(LIVEPORTRAIT_DIR))
         from src.live_portrait_pipeline import LivePortraitPipeline
         from src.config.inference_config import InferenceConfig
-        cfg = InferenceConfig()
-        cfg.models_config = str(LIVEPORTRAIT_DIR / "src" / "config" / "models.yaml")
-        liveportrait_pipeline = LivePortraitPipeline(cfg)
+        from src.config.crop_config import CropConfig
+
+        inference_cfg = InferenceConfig()
+        crop_cfg = CropConfig()
+        liveportrait_pipeline = LivePortraitPipeline(
+            inference_cfg=inference_cfg,
+            crop_cfg=crop_cfg,
+        )
         log.info("LivePortrait loaded")
     except Exception as e:
         log.warning(f"LivePortrait unavailable: {e}")
         liveportrait_pipeline = None
 
     log.info("Loading expression images...")
+    log.info(f"Expressions dir: {EXPRESSIONS_DIR}, exists: {EXPRESSIONS_DIR.exists()}")
+    if EXPRESSIONS_DIR.exists():
+        log.info(f"Contents: {list(EXPRESSIONS_DIR.glob('*'))}")
     if EXPRESSIONS_DIR.exists():
         for f in EXPRESSIONS_DIR.glob("*.png"):
             try:
@@ -126,20 +134,63 @@ def handler(event):
         try:
             log.info(f"Applying expression: {expression}")
             driving_image = expression_images[expression]
-            source_np = np.array(source_image)
-            driving_np = np.array(driving_image)
-            result = liveportrait_pipeline.execute(source_np, driving_np)
 
-            if result is not None:
-                result_image = Image.fromarray(result).convert("RGB")
+            # Save source and driving images to temp files (LivePortrait expects file paths)
+            import tempfile
+            src_path = os.path.join(tempfile.gettempdir(), f"lp_src_{os.getpid()}.png")
+            drv_path = os.path.join(tempfile.gettempdir(), f"lp_drv_{os.getpid()}.png")
+            out_dir = os.path.join(tempfile.gettempdir(), f"lp_out_{os.getpid()}")
+            os.makedirs(out_dir, exist_ok=True)
+
+            source_image.save(src_path)
+            driving_image.save(drv_path)
+
+            # Create an args-like object for LivePortrait's execute method
+            from types import SimpleNamespace
+            args = SimpleNamespace(
+                source_image=src_path,
+                driving_info=drv_path,
+                output_dir=out_dir,
+                flag_relative_motion=True,
+                flag_do_crop=True,
+                flag_pasteback=True,
+                flag_do_rot=True,
+                flag_stitching=True,
+                driving_multiplier=1.0,
+                flag_crop_driving_video=True,
+                flag_eye_retargeting=False,
+                flag_lip_retargeting=False,
+                animation_region="all",
+            )
+
+            liveportrait_pipeline.execute(args)
+
+            # Find the output image
+            output_files = list(Path(out_dir).glob("*.png")) + list(Path(out_dir).glob("*.jpg"))
+            if output_files:
+                result_image = Image.open(output_files[0]).convert("RGB")
                 result_image = result_image.resize(cutout_rgba.size, Image.LANCZOS)
                 result_rgba = result_image.convert("RGBA")
+                # Apply the alpha mask from rembg
                 alpha = cutout_rgba.split()[3]
                 result_rgba.putalpha(alpha)
                 cutout_rgba = result_rgba
                 log.info(f"Expression applied: {expression}")
+            else:
+                log.warning("LivePortrait produced no output files")
+
+            # Cleanup temp files
+            for f in [src_path, drv_path]:
+                try: os.remove(f)
+                except: pass
+            import shutil
+            try: shutil.rmtree(out_dir)
+            except: pass
+
         except Exception as e:
             log.error(f"Expression failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     # 4. Resize
     target_h = int(output_height * 0.85)

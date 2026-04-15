@@ -56,10 +56,8 @@ RUN cd /app/LivePortrait && \
 RUN python -c "from rembg import new_session; new_session('u2net')" || \
     echo "Warning: Failed to pre-download rembg model."
 
-# ── Create expressions directory ─────────────────────────────
-# Expression driving images will be added here
-# For now, create the directory — images are sourced separately
-RUN mkdir -p /app/expressions
+# ── Copy expression driving images ───────────────────────────
+COPY expressions/ /app/expressions/
 
 # ── Copy server code ─────────────────────────────────────────
 COPY thumbnail_server.py /app/thumbnail_server.py
