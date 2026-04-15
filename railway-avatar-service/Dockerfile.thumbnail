@@ -1,0 +1,74 @@
+# Thumbnail Service — LivePortrait + rembg GPU Docker Image
+# Processes user photos: expression modification + background removal
+#
+# Build: docker build -f Dockerfile.thumbnail -t thumbnail-service .
+# Run:   docker run --gpus all -p 8080:8080 -e THUMBNAIL_SERVICE_SECRET=test123 thumbnail-service
+
+FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
+
+WORKDIR /app
+
+# ── System dependencies ─────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+    libegl1-mesa \
+    libgles2-mesa \
+    git \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Python dependencies ─────────────────────────────────────
+RUN pip install --no-cache-dir \
+    fastapi==0.115.6 \
+    uvicorn[standard]==0.34.0 \
+    httpx==0.28.1 \
+    python-multipart==0.0.18 \
+    Pillow==11.1.0 \
+    numpy==1.26.4 \
+    opencv-python-headless==4.10.0.84 \
+    rembg[gpu]==2.0.60 \
+    onnxruntime-gpu==1.18.1 \
+    insightface==0.7.3 \
+    scikit-image==0.24.0 \
+    scipy==1.14.1
+
+# ── Clone LivePortrait ──────────────────────────────────────
+RUN git clone https://github.com/KwaiVGI/LivePortrait.git /app/LivePortrait
+
+# Install LivePortrait's dependencies
+RUN cd /app/LivePortrait && \
+    pip install --no-cache-dir -r requirements.txt 2>/dev/null || true
+
+# ── Download LivePortrait pretrained weights ─────────────────
+# LivePortrait weights are smaller than Hallo2 (~2-3GB vs ~15GB)
+RUN cd /app/LivePortrait && \
+    python -c "from huggingface_hub import snapshot_download; snapshot_download('KwaiVGI/LivePortrait', local_dir='pretrained_weights')" || \
+    echo "Warning: Failed to download LivePortrait weights. Will try at runtime."
+
+# ── Download rembg model (u2net) ─────────────────────────────
+# Pre-download so first request doesn't wait for model download
+RUN python -c "from rembg import new_session; new_session('u2net')" || \
+    echo "Warning: Failed to pre-download rembg model."
+
+# ── Create expressions directory ─────────────────────────────
+# Expression driving images will be added here
+# For now, create the directory — images are sourced separately
+RUN mkdir -p /app/expressions
+
+# ── Copy server code ─────────────────────────────────────────
+COPY thumbnail_server.py /app/thumbnail_server.py
+
+# ── Expose port ──────────────────────────────────────────────
+EXPOSE 8080
+
+# ── Health check ─────────────────────────────────────────────
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s \
+    CMD python -c "import httpx; r = httpx.get('http://localhost:8080/health'); r.raise_for_status()" || exit 1
+
+# ── Run ──────────────────────────────────────────────────────
+CMD ["python", "/app/thumbnail_server.py"]
