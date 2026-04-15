@@ -6,6 +6,7 @@ on:
     paths:
       - 'railway-avatar-service/Dockerfile.thumbnail'
       - 'railway-avatar-service/thumbnail_server.py'
+      - 'railway-avatar-service/runpod_handler.py'
       - 'railway-avatar-service/expressions/**'
       - '.github/workflows/build-thumbnail-image.yml'
   workflow_dispatch: # Allow manual trigger
