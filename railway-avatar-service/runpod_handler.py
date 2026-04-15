@@ -146,10 +146,11 @@ def handler(event):
             driving_image.save(drv_path)
 
             # Create an args-like object for LivePortrait's execute method
+            # LivePortrait expects: args.source, args.driving, args.output_dir
             from types import SimpleNamespace
             args = SimpleNamespace(
-                source_image=src_path,
-                driving_info=drv_path,
+                source=src_path,
+                driving=drv_path,
                 output_dir=out_dir,
                 flag_relative_motion=True,
                 flag_do_crop=True,
@@ -161,6 +162,8 @@ def handler(event):
                 flag_eye_retargeting=False,
                 flag_lip_retargeting=False,
                 animation_region="all",
+                flag_write_result=True,
+                flag_write_gif=False,
             )
 
             liveportrait_pipeline.execute(args)
