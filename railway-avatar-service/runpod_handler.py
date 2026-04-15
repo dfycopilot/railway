@@ -168,10 +168,24 @@ def handler(event):
 
             liveportrait_pipeline.execute(args)
 
-            # Find the output image
-            output_files = list(Path(out_dir).glob("*.png")) + list(Path(out_dir).glob("*.jpg"))
+            # Find the output image — exclude concat files (which are side-by-side comparisons)
+            all_outputs = list(Path(out_dir).glob("*.png")) + list(Path(out_dir).glob("*.jpg"))
+            output_files = [f for f in all_outputs if "concat" not in f.name.lower()]
+            if not output_files:
+                output_files = all_outputs  # fallback to concat if no non-concat found
+
+            log.info(f"Output files found: {[f.name for f in all_outputs]}, using: {output_files[0].name if output_files else 'none'}")
+
             if output_files:
                 result_image = Image.open(output_files[0]).convert("RGB")
+
+                # If this is a concat image (source + result side by side), take the right half
+                if result_image.width > result_image.height * 1.5:
+                    # Likely a concat — crop right half (the animated result)
+                    half_w = result_image.width // 2
+                    result_image = result_image.crop((half_w, 0, result_image.width, result_image.height))
+                    log.info(f"Cropped concat image to right half: {result_image.size}")
+
                 result_image = result_image.resize(cutout_rgba.size, Image.LANCZOS)
                 result_rgba = result_image.convert("RGBA")
                 # Apply the alpha mask from rembg
