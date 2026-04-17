@@ -9,9 +9,12 @@
  *   POST /composite-slide   — composite a single slide (Phase A.5 + B)
  *   GET  /health            — health check
  *
- * Auth: Bearer token (COMPOSITOR_AUTH_TOKEN env var). Same pattern as the
- * existing remotion-composition service so the edge function proxy can
- * reuse its auth helper.
+ * Upload pattern: Uses signed upload URLs (same pattern as the Remotion
+ * service). The edge function generates a signed URL from Supabase Storage
+ * and passes it here; we PUT the file to that URL. No Supabase credentials
+ * ever live on Railway.
+ *
+ * Auth: Bearer token (COMPOSITOR_AUTH_TOKEN env var).
  *
  * The heavy lifting is a single ffmpeg command that:
  *   1. Loads the slide image (looped for the video duration)
@@ -27,7 +30,6 @@
 
 import express from "express";
 import { spawn } from "child_process";
-import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -38,17 +40,7 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 3000;
-const AUTH_TOKEN = process.env.COMPOSITOR_AUTH_TOKEN;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.warn("[startup] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY — uploads will fail");
-}
-
-const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-  : null;
+const AUTH_TOKEN = process.env.COMPOSITOR_AUTH_TOKEN || process.env.AUTH_TOKEN;
 
 // ── Auth middleware ──
 function authMiddleware(req, res, next) {
@@ -65,7 +57,7 @@ function authMiddleware(req, res, next) {
 
 // ── Health ──
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "slide-compositor", version: "1.0.0" });
+  res.json({ status: "ok", service: "slide-compositor", version: "1.1.0" });
 });
 
 // ── Position → overlay coordinates ──
@@ -138,11 +130,16 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     size = "medium",
     slide_width = 1920,
     slide_height = 1080,
-    storage_path,  // e.g. "presentations/agency/pres_id/slide_000_composited.mp4"
+    // Signed upload URL (from Supabase storage.createSignedUploadUrl).
+    // Railway PUTs the composited file to this URL — no Supabase creds needed here.
+    signed_upload_url,
   } = req.body || {};
 
   if (!talking_head_url || !slide_image_url) {
     return res.status(400).json({ error: "talking_head_url and slide_image_url are required" });
+  }
+  if (!signed_upload_url) {
+    return res.status(400).json({ error: "signed_upload_url is required — edge function must generate one from Supabase storage" });
   }
 
   console.log(`[${jobId}] Compositing: pos=${position} size=${size} slide=${slide_width}x${slide_height}`);
@@ -214,30 +211,23 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     const stat = fs.statSync(outPath);
     console.log(`[${jobId}] ffmpeg done in ${Date.now() - startTime}ms — ${(stat.size / 1024).toFixed(0)}KB`);
 
-    // 4) Upload to Supabase storage
-    if (!supabase) {
-      throw new Error("Supabase credentials not configured on this service");
+    // 4) Upload via signed URL (PUT). Same pattern as the Remotion service —
+    //    the edge function already generated this URL from Supabase storage,
+    //    so Railway never needs service_role credentials.
+    const fileBuffer = fs.readFileSync(outPath);
+    const uploadResp = await fetch(signed_upload_url, {
+      method: "PUT",
+      headers: { "Content-Type": "video/mp4" },
+      body: fileBuffer,
+    });
+    if (!uploadResp.ok) {
+      const errText = await uploadResp.text().catch(() => "");
+      throw new Error(`Signed-URL upload failed ${uploadResp.status}: ${errText.slice(0, 300)}`);
     }
-    const finalPath = storage_path || `presentations/composited/${Date.now()}_${jobId}.mp4`;
-    const buf = fs.readFileSync(outPath);
-    const { error: upErr } = await supabase.storage
-      .from("generated-files")
-      .upload(finalPath, buf, { contentType: "video/mp4", upsert: true });
-    if (upErr) throw new Error(`Upload failed: ${upErr.message}`);
-
-    const { data: urlData } = supabase.storage
-      .from("generated-files")
-      .getPublicUrl(finalPath);
-
-    const publicUrl = urlData?.publicUrl;
-    if (!publicUrl) throw new Error("Failed to resolve public URL");
-
-    console.log(`[${jobId}] Uploaded to ${publicUrl}`);
+    console.log(`[${jobId}] Uploaded via signed URL (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
 
     res.json({
       success: true,
-      composited_url: publicUrl,
-      storage_path: finalPath,
       duration_ms: Date.now() - startTime,
       size_bytes: stat.size,
     });
