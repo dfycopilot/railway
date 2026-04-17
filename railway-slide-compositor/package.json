@@ -1,0 +1,14 @@
+{
+  "name": "slide-compositor-service",
+  "version": "1.0.0",
+  "description": "ffmpeg-based service that composites a talking-head video into a circular frame on a slide image. Used by DFY Copilot's Webinar Builder (Phase A.5 + B).",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "@supabase/supabase-js": "^2.40.0"
+  }
+}
