@@ -7,6 +7,7 @@
  *
  * Endpoints:
  *   POST /composite-slide   — composite a single slide (Phase A.5 + B)
+ *   POST /stitch-webinar    — concat N composited clips into final MP4 (Phase B)
  *   GET  /health            — health check
  *
  * Upload pattern: Uses signed upload URLs (same pattern as the Remotion
@@ -239,6 +240,136 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     });
   } finally {
     // Cleanup temp files
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+// ── POST /stitch-webinar ──
+//
+// Concatenates N composited slide clips into one final webinar MP4.
+//
+// Strategy: First attempt the concat demuxer with `-c copy` (no re-encode,
+// fastest). If that fails (slides have mismatched codec params), fall back
+// to the filter_complex concat which re-encodes — slower but always works.
+//
+// Typical times:
+//   38 × 60s clips via -c copy: 5-10 seconds
+//   Same with filter re-encode: 1-3 minutes
+app.post("/stitch-webinar", authMiddleware, async (req, res) => {
+  const startTime = Date.now();
+  const jobId = crypto.randomUUID().slice(0, 8);
+
+  const {
+    clip_urls,
+    signed_upload_url,
+  } = req.body || {};
+
+  if (!Array.isArray(clip_urls) || clip_urls.length === 0) {
+    return res.status(400).json({ error: "clip_urls must be a non-empty array" });
+  }
+  if (!signed_upload_url) {
+    return res.status(400).json({ error: "signed_upload_url is required" });
+  }
+
+  console.log(`[${jobId}] Stitching ${clip_urls.length} clips`);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "stitch-"));
+  const listPath = path.join(tmpDir, "concat.txt");
+  const outPath = path.join(tmpDir, "final.mp4");
+
+  try {
+    // 1) Download all clips in parallel
+    const localPaths = [];
+    await Promise.all(clip_urls.map(async (url, i) => {
+      const localPath = path.join(tmpDir, `clip_${String(i).padStart(3, "0")}.mp4`);
+      await downloadTo(url, localPath);
+      localPaths[i] = localPath;
+    }));
+    console.log(`[${jobId}] Downloaded ${clip_urls.length} clips in ${Date.now() - startTime}ms`);
+
+    // 2) Build concat list file
+    // Format: one line per file, path must be quoted, single-quote escaping is \\'
+    const listContents = localPaths
+      .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
+      .join("\n");
+    fs.writeFileSync(listPath, listContents, "utf8");
+
+    // 3) Attempt fast path: concat demuxer + stream copy
+    const fastArgs = [
+      "-y",
+      "-f", "concat",
+      "-safe", "0",
+      "-i", listPath,
+      "-c", "copy",
+      "-movflags", "+faststart",
+      outPath,
+    ];
+
+    let method = "stream-copy";
+    try {
+      await runFfmpeg(fastArgs);
+    } catch (fastErr) {
+      console.warn(`[${jobId}] Fast concat failed, falling back to filter_complex re-encode:`, fastErr.message?.slice(0, 200));
+      method = "filter-reencode";
+
+      // Build filter_complex inputs + concat filter
+      const inputArgs = [];
+      for (const p of localPaths) {
+        inputArgs.push("-i", p);
+      }
+      // [0:v][0:a][1:v][1:a]...concat=n=N:v=1:a=1
+      const n = localPaths.length;
+      const filterInputs = localPaths.map((_, i) => `[${i}:v][${i}:a]`).join("");
+      const filter = `${filterInputs}concat=n=${n}:v=1:a=1[v][a]`;
+
+      const reencodeArgs = [
+        "-y",
+        ...inputArgs,
+        "-filter_complex", filter,
+        "-map", "[v]",
+        "-map", "[a]",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        outPath,
+      ];
+      await runFfmpeg(reencodeArgs);
+    }
+
+    const stat = fs.statSync(outPath);
+    console.log(`[${jobId}] Stitched (${method}) in ${Date.now() - startTime}ms — ${(stat.size / 1024 / 1024).toFixed(1)}MB`);
+
+    // 4) Upload via signed URL
+    const fileBuffer = fs.readFileSync(outPath);
+    const uploadResp = await fetch(signed_upload_url, {
+      method: "PUT",
+      headers: { "Content-Type": "video/mp4" },
+      body: fileBuffer,
+    });
+    if (!uploadResp.ok) {
+      const errText = await uploadResp.text().catch(() => "");
+      throw new Error(`Signed-URL upload failed ${uploadResp.status}: ${errText.slice(0, 300)}`);
+    }
+    console.log(`[${jobId}] Uploaded final webinar MP4`);
+
+    res.json({
+      success: true,
+      duration_ms: Date.now() - startTime,
+      size_bytes: stat.size,
+      method,
+      clip_count: clip_urls.length,
+    });
+  } catch (err) {
+    console.error(`[${jobId}] Stitch error:`, err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 });
