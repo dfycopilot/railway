@@ -8,6 +8,8 @@
  * Endpoints:
  *   POST /composite-slide   — composite a single slide (Phase A.5 + B)
  *   POST /stitch-webinar    — concat N composited clips into final MP4 (Phase B)
+ *   POST /stitch-audio      — concat per-sentence ElevenLabs MP3 chunks with
+ *                             subtle breath spacers (Option D lipsync fix)
  *   GET  /health            — health check
  *
  * Upload pattern: Uses signed upload URLs (same pattern as the Remotion
@@ -38,7 +40,10 @@ import os from "os";
 import { pipeline } from "stream/promises";
 
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+// 50mb: stitch-audio receives base64-encoded MP3 chunks for 8-12 sentences,
+// plus overhead. A 60-second script at 128kbps MP3 is ~1MB; base64 +33%;
+// with a few sentences that approaches a few MB. 50mb keeps plenty of headroom.
+app.use(express.json({ limit: "50mb" }));
 
 const PORT = process.env.PORT || 3000;
 const AUTH_TOKEN = process.env.COMPOSITOR_AUTH_TOKEN || process.env.AUTH_TOKEN;
@@ -366,6 +371,143 @@ app.post("/stitch-webinar", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error(`[${jobId}] Stitch error:`, err);
     res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+/**
+ * POST /stitch-audio
+ *
+ * Takes N base64-encoded audio chunks (one per sentence from ElevenLabs),
+ * inserts a short subtle breath-like spacer between each, concatenates them
+ * into one MP3, and PUTs it to the signed upload URL.
+ *
+ * Why: D-ID's audio-mode lip sync drifts on long clips with hard silences.
+ * By rendering each sentence as its own clean TTS call and splicing them
+ * with a non-silent (pink-noise breath-like) spacer, we give D-ID a
+ * continuous audio signal to sync against — much better fidelity AND more
+ * natural pacing than injecting <break> tags inline.
+ *
+ * Input:
+ *   {
+ *     sentence_audios: string[]     // base64 MP3 bytes, one per sentence
+ *     breath_ms: number             // duration of inter-sentence breath in ms (default 450)
+ *     signed_upload_url: string     // Supabase Storage signed upload URL
+ *   }
+ *
+ * Output: { success, audio_url?, duration_ms, sentence_count, method }
+ */
+app.post("/stitch-audio", authMiddleware, async (req, res) => {
+  const startedAt = Date.now();
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "stitch-audio-"));
+
+  try {
+    const { sentence_audios, breath_ms, signed_upload_url } = req.body || {};
+
+    if (!Array.isArray(sentence_audios) || sentence_audios.length === 0) {
+      return res.status(400).json({ success: false, error: "sentence_audios (array) required" });
+    }
+    if (!signed_upload_url) {
+      return res.status(400).json({ success: false, error: "signed_upload_url required" });
+    }
+
+    const breathDurSec = Math.max(0.15, Math.min(1.2, (breath_ms ?? 450) / 1000));
+
+    // 1. Decode each chunk to a temp file
+    const chunkPaths = [];
+    for (let i = 0; i < sentence_audios.length; i++) {
+      const b64 = sentence_audios[i];
+      if (typeof b64 !== "string" || b64.length === 0) {
+        return res.status(400).json({ success: false, error: `sentence_audios[${i}] empty` });
+      }
+      const buf = Buffer.from(b64, "base64");
+      const p = path.join(tmpDir, `chunk_${i}.mp3`);
+      fs.writeFileSync(p, buf);
+      chunkPaths.push(p);
+    }
+
+    // 2. Generate a subtle breath spacer with ffmpeg.
+    //
+    // We use very low-amplitude pink noise (~-40dB) with a 60ms fade in/out
+    // to simulate a soft breath sound. D-ID's sync model sees this as a
+    // continuous (non-silent) audio signal and keeps the mouth closed/resting
+    // instead of ghost-chewing through dead silence.
+    //
+    // Output format matches ElevenLabs MP3 output so we can concat cleanly.
+    const breathPath = path.join(tmpDir, "breath.mp3");
+    await runFfmpeg([
+      "-f", "lavfi",
+      "-i", `anoisesrc=d=${breathDurSec.toFixed(2)}:c=pink:r=44100:a=0.008`,
+      "-af", `afade=t=in:ss=0:d=0.08,afade=t=out:st=${(breathDurSec - 0.08).toFixed(2)}:d=0.08`,
+      "-ac", "1",
+      "-ar", "44100",
+      "-b:a", "128k",
+      "-y",
+      breathPath,
+    ]);
+
+    // 3. Short-circuit: if there's only one sentence, no stitching needed —
+    //    just upload the single chunk as-is. (We still re-encode below for
+    //    consistent format, but we could skip that.)
+    const isSingle = chunkPaths.length === 1;
+
+    // 4. Build an interleaved sequence: [chunk0, breath, chunk1, breath, ..., chunkN]
+    //    and concat with filter_complex so the mixer handles any format drift.
+    const inputs = [];
+    if (isSingle) {
+      inputs.push(chunkPaths[0]);
+    } else {
+      for (let i = 0; i < chunkPaths.length; i++) {
+        inputs.push(chunkPaths[i]);
+        if (i < chunkPaths.length - 1) inputs.push(breathPath);
+      }
+    }
+
+    const finalPath = path.join(tmpDir, "final.mp3");
+    const ffargs = [];
+    for (const f of inputs) ffargs.push("-i", f);
+    // Build filter: [0:a][1:a]...[N-1:a]concat=n=N:v=0:a=1[out]
+    const filter = inputs
+      .map((_, i) => `[${i}:a]`)
+      .join("") + `concat=n=${inputs.length}:v=0:a=1[out]`;
+    ffargs.push(
+      "-filter_complex", filter,
+      "-map", "[out]",
+      "-ac", "1",
+      "-ar", "44100",
+      "-b:a", "128k",
+      "-y",
+      finalPath,
+    );
+    await runFfmpeg(ffargs);
+
+    // 5. Upload via signed URL
+    const body = fs.readFileSync(finalPath);
+    const uploadRes = await fetch(signed_upload_url, {
+      method: "PUT",
+      headers: { "Content-Type": "audio/mpeg", "x-upsert": "true" },
+      body,
+    });
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text().catch(() => "");
+      throw new Error(`Upload failed ${uploadRes.status}: ${errText.slice(0, 500)}`);
+    }
+
+    return res.json({
+      success: true,
+      sentence_count: sentence_audios.length,
+      breath_ms: Math.round(breathDurSec * 1000),
+      duration_ms: Date.now() - startedAt,
+      method: isSingle ? "passthrough" : "concat",
+      bytes: body.length,
+    });
+  } catch (err) {
+    console.error("[stitch-audio] error:", err);
+    return res.status(500).json({
       success: false,
       error: err instanceof Error ? err.message : String(err),
     });
