@@ -425,12 +425,13 @@ app.post("/composite-waveform-slide", authMiddleware, async (req, res) => {
     return res.status(400).json({ error: "signed_upload_url is required" });
   }
 
-  // "waveform" position just means "put the waveform circle in the default
-  // top-right spot with the chosen size". Translate it so computeOverlay()
-  // gets a real placement.
+  // "waveform" position just means "put the circle in the default top-right
+  // spot with the chosen size". Translate so computeOverlay() gets a real
+  // placement. "hidden" position skips placement entirely (handled below).
   const visualPos = position === "waveform" ? "top-right" : position;
+  const isHidden = waveform_style === "none" || position === "hidden";
 
-  console.log(`[${jobId}] Waveform composite: style=${waveform_style} pos=${visualPos} size=${size} slide=${slide_width}x${slide_height}`);
+  console.log(`[${jobId}] Audio-only composite: style=${waveform_style} pos=${visualPos} size=${size} slide=${slide_width}x${slide_height}${isHidden ? " (no visualizer)" : ""}`);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wave-composite-"));
   const audioPath = path.join(tmpDir, "audio.mp3");
@@ -444,59 +445,51 @@ app.post("/composite-waveform-slide", authMiddleware, async (req, res) => {
       downloadTo(slide_image_url, slidePath),
     ]);
 
-    // 2) Compute overlay geometry (reuse the talking-head logic)
-    const { x, y, size: circlePx } = computeOverlay(
-      slide_width,
-      slide_height,
-      visualPos,
-      sizeToPct(size),
-    );
-    const halfSize = Math.round(circlePx / 2);
-
-    // 3) Build the per-style ffmpeg visualizer filter.
-    //
-    // All styles produce a square video (circlePx × circlePx) which we then
-    // mask to a circle via geq (same trick as the talking-head pipeline).
-    // The audio stream drives the visualization in real time.
-    //
-    // Color: a glowing cyan-blue (0x00AAFF) on a semi-transparent dark
-    // background — reads as "AI assistant" and contrasts well on most
-    // slide designs. Users who want different colors can add a theme
-    // option later.
-    //
-    //   line → classic horizontal waveform (showwaves mode=line)
-    //   bars → vertical frequency bars (showfreqs mode=bar, log scale)
-    let vizFilter;
-    switch (waveform_style) {
-      case "bars":
-        // showfreqs: frequency-domain bars. Log scale so voice's mid-range
-        // dominates the visual (vocals are typically 200-4000Hz).
-        vizFilter = `[0:a]showfreqs=s=${circlePx}x${circlePx}:mode=bar:ascale=log:fscale=log:win_size=2048:colors=0x00AAFF|0x0077CC,format=yuva420p[viz]`;
-        break;
-      case "line":
-      default:
-        // showwaves: time-domain waveform line. Classic "AI assistant" look.
-        // Draw at a frame rate that matches the final output (30fps).
-        vizFilter = `[0:a]showwaves=s=${circlePx}x${circlePx}:mode=line:colors=0x00AAFF:rate=30:draw=full,format=yuva420p[viz]`;
-        break;
+    // 2) Compute overlay geometry (reuse the talking-head logic).
+    // Hidden mode has no overlay, so skip geometry.
+    let x = 0, y = 0, circlePx = 0, halfSize = 0;
+    if (!isHidden) {
+      const geo = computeOverlay(
+        slide_width,
+        slide_height,
+        visualPos,
+        sizeToPct(size),
+      );
+      x = geo.x; y = geo.y; circlePx = geo.size;
+      halfSize = Math.round(circlePx / 2);
     }
 
-    // Mask [viz] to a circle (inscribed in the square) and overlay on slide.
+    // 3) Build the filter graph.
     //
-    //   [viz] → crop-to-circle via geq alpha mask
-    //   [0:v] slide → scale to slide_width × slide_height
-    //   overlay the circle at (x,y)
-    const filterComplex = [
-      vizFilter,
-      // Put a subtle dark glow background behind the waveform so a thin line
-      // doesn't disappear on bright slides. We composite the viz on top of
-      // a semi-transparent dark disc, then circle-mask the combined result.
-      // Simpler approach: just circle-mask the viz directly. The line/bars
-      // are drawn on black by default, which reads as a "screen" inside the circle.
-      `[viz]geq='r=r(X,Y):g=g(X,Y):b=b(X,Y):a=if(gt(pow(X-${halfSize},2)+pow(Y-${halfSize},2),pow(${halfSize},2)),0,255)'[circle]`,
-      `[1:v]scale=${slide_width}:${slide_height}:force_original_aspect_ratio=decrease,pad=${slide_width}:${slide_height}:(ow-iw)/2:(oh-ih)/2:color=black[bg]`,
-      `[bg][circle]overlay=${x}:${y}:shortest=1[v]`,
-    ].join(";");
+    // Hidden mode → no overlay, just slide as looped video + audio.
+    // Waveform modes → generate visualizer, circle-mask, overlay on slide.
+    //
+    // Color for waveform: cyan-blue (0x00AAFF) glow on black. Reads as
+    // "AI assistant", contrasts well on most slide designs.
+    let filterComplex;
+    if (isHidden) {
+      filterComplex = `[1:v]scale=${slide_width}:${slide_height}:force_original_aspect_ratio=decrease,pad=${slide_width}:${slide_height}:(ow-iw)/2:(oh-ih)/2:color=black[v]`;
+    } else {
+      let vizFilter;
+      switch (waveform_style) {
+        case "bars":
+          // showfreqs: frequency-domain bars, log scale so voice mid-range
+          // (200-4000Hz) dominates the visual.
+          vizFilter = `[0:a]showfreqs=s=${circlePx}x${circlePx}:mode=bar:ascale=log:fscale=log:win_size=2048:colors=0x00AAFF|0x0077CC,format=yuva420p[viz]`;
+          break;
+        case "line":
+        default:
+          // showwaves: time-domain waveform line, Jarvis-style.
+          vizFilter = `[0:a]showwaves=s=${circlePx}x${circlePx}:mode=line:colors=0x00AAFF:rate=30:draw=full,format=yuva420p[viz]`;
+          break;
+      }
+      filterComplex = [
+        vizFilter,
+        `[viz]geq='r=r(X,Y):g=g(X,Y):b=b(X,Y):a=if(gt(pow(X-${halfSize},2)+pow(Y-${halfSize},2),pow(${halfSize},2)),0,255)'[circle]`,
+        `[1:v]scale=${slide_width}:${slide_height}:force_original_aspect_ratio=decrease,pad=${slide_width}:${slide_height}:(ow-iw)/2:(oh-ih)/2:color=black[bg]`,
+        `[bg][circle]overlay=${x}:${y}:shortest=1[v]`,
+      ].join(";");
+    }
 
     const args = [
       "-y",
