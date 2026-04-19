@@ -6,11 +6,13 @@
  * frame on top of the slide.
  *
  * Endpoints:
- *   POST /composite-slide   — composite a single slide (Phase A.5 + B)
- *   POST /stitch-webinar    — concat N composited clips into final MP4 (Phase B)
- *   POST /stitch-audio      — concat per-sentence ElevenLabs MP3 chunks with
- *                             subtle breath spacers (Option D lipsync fix)
- *   GET  /health            — health check
+ *   POST /composite-slide           — composite a single slide with talking head
+ *   POST /composite-waveform-slide  — composite a slide with an audio-reactive
+ *                                      waveform circle instead of a face (no D-ID)
+ *   POST /stitch-webinar            — concat N composited clips into final MP4
+ *   POST /stitch-audio              — concat per-sentence ElevenLabs MP3 chunks
+ *                                      with subtle breath spacers (lipsync fix)
+ *   GET  /health                    — health check
  *
  * Upload pattern: Uses signed upload URLs (same pattern as the Remotion
  * service). The edge function generates a signed URL from Supabase Storage
@@ -370,6 +372,177 @@ app.post("/stitch-webinar", authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error(`[${jobId}] Stitch error:`, err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+/**
+ * POST /composite-waveform-slide
+ *
+ * Like /composite-slide but renders an audio-reactive waveform animation
+ * in the overlay circle instead of a talking-head video. Used when a slide
+ * is set to "Voice Waveform" mode — no D-ID call required on the way in.
+ *
+ * Input:
+ *   {
+ *     audio_url:         string   // required — MP3 of the narration
+ *     slide_image_url:   string   // required — slide background PNG
+ *     position:          string   // top-right / top-left / bottom-right /
+ *                                    bottom-left / centered-large / waveform
+ *     size:              string   // small / medium / large
+ *     waveform_style:    string   // "line" (Jarvis-style) or "bars" (Siri-style)
+ *     slide_width:       number
+ *     slide_height:      number
+ *     signed_upload_url: string
+ *   }
+ *
+ * Output: { success, duration_ms, size_bytes, method }
+ */
+app.post("/composite-waveform-slide", authMiddleware, async (req, res) => {
+  const startTime = Date.now();
+  const jobId = crypto.randomUUID().slice(0, 8);
+
+  const {
+    audio_url,
+    slide_image_url,
+    position = "top-right",
+    size = "medium",
+    waveform_style = "line",
+    slide_width = 1920,
+    slide_height = 1080,
+    signed_upload_url,
+  } = req.body || {};
+
+  if (!audio_url || !slide_image_url) {
+    return res.status(400).json({ error: "audio_url and slide_image_url are required" });
+  }
+  if (!signed_upload_url) {
+    return res.status(400).json({ error: "signed_upload_url is required" });
+  }
+
+  // "waveform" position just means "put the waveform circle in the default
+  // top-right spot with the chosen size". Translate it so computeOverlay()
+  // gets a real placement.
+  const visualPos = position === "waveform" ? "top-right" : position;
+
+  console.log(`[${jobId}] Waveform composite: style=${waveform_style} pos=${visualPos} size=${size} slide=${slide_width}x${slide_height}`);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wave-composite-"));
+  const audioPath = path.join(tmpDir, "audio.mp3");
+  const slidePath = path.join(tmpDir, "slide.png");
+  const outPath = path.join(tmpDir, "out.mp4");
+
+  try {
+    // 1) Download audio + slide
+    await Promise.all([
+      downloadTo(audio_url, audioPath),
+      downloadTo(slide_image_url, slidePath),
+    ]);
+
+    // 2) Compute overlay geometry (reuse the talking-head logic)
+    const { x, y, size: circlePx } = computeOverlay(
+      slide_width,
+      slide_height,
+      visualPos,
+      sizeToPct(size),
+    );
+    const halfSize = Math.round(circlePx / 2);
+
+    // 3) Build the per-style ffmpeg visualizer filter.
+    //
+    // All styles produce a square video (circlePx × circlePx) which we then
+    // mask to a circle via geq (same trick as the talking-head pipeline).
+    // The audio stream drives the visualization in real time.
+    //
+    // Color: a glowing cyan-blue (0x00AAFF) on a semi-transparent dark
+    // background — reads as "AI assistant" and contrasts well on most
+    // slide designs. Users who want different colors can add a theme
+    // option later.
+    //
+    //   line → classic horizontal waveform (showwaves mode=line)
+    //   bars → vertical frequency bars (showfreqs mode=bar, log scale)
+    let vizFilter;
+    switch (waveform_style) {
+      case "bars":
+        // showfreqs: frequency-domain bars. Log scale so voice's mid-range
+        // dominates the visual (vocals are typically 200-4000Hz).
+        vizFilter = `[0:a]showfreqs=s=${circlePx}x${circlePx}:mode=bar:ascale=log:fscale=log:win_size=2048:colors=0x00AAFF|0x0077CC,format=yuva420p[viz]`;
+        break;
+      case "line":
+      default:
+        // showwaves: time-domain waveform line. Classic "AI assistant" look.
+        // Draw at a frame rate that matches the final output (30fps).
+        vizFilter = `[0:a]showwaves=s=${circlePx}x${circlePx}:mode=line:colors=0x00AAFF:rate=30:draw=full,format=yuva420p[viz]`;
+        break;
+    }
+
+    // Mask [viz] to a circle (inscribed in the square) and overlay on slide.
+    //
+    //   [viz] → crop-to-circle via geq alpha mask
+    //   [0:v] slide → scale to slide_width × slide_height
+    //   overlay the circle at (x,y)
+    const filterComplex = [
+      vizFilter,
+      // Put a subtle dark glow background behind the waveform so a thin line
+      // doesn't disappear on bright slides. We composite the viz on top of
+      // a semi-transparent dark disc, then circle-mask the combined result.
+      // Simpler approach: just circle-mask the viz directly. The line/bars
+      // are drawn on black by default, which reads as a "screen" inside the circle.
+      `[viz]geq='r=r(X,Y):g=g(X,Y):b=b(X,Y):a=if(gt(pow(X-${halfSize},2)+pow(Y-${halfSize},2),pow(${halfSize},2)),0,255)'[circle]`,
+      `[1:v]scale=${slide_width}:${slide_height}:force_original_aspect_ratio=decrease,pad=${slide_width}:${slide_height}:(ow-iw)/2:(oh-ih)/2:color=black[bg]`,
+      `[bg][circle]overlay=${x}:${y}:shortest=1[v]`,
+    ].join(";");
+
+    const args = [
+      "-y",
+      "-i", audioPath,                        // [0] audio (drives viz)
+      "-loop", "1", "-framerate", "30",
+      "-i", slidePath,                        // [1] slide image
+      "-filter_complex", filterComplex,
+      "-map", "[v]",
+      "-map", "0:a",
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-crf", "23",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-shortest",
+      "-movflags", "+faststart",
+      outPath,
+    ];
+
+    console.log(`[${jobId}] Running ffmpeg (viz=${waveform_style} at ${x},${y} size ${circlePx}px)`);
+    await runFfmpeg(args);
+
+    const stat = fs.statSync(outPath);
+    console.log(`[${jobId}] Done in ${Date.now() - startTime}ms — ${(stat.size / 1024).toFixed(0)}KB`);
+
+    // 4) Upload via signed URL
+    const fileBuffer = fs.readFileSync(outPath);
+    const uploadResp = await fetch(signed_upload_url, {
+      method: "PUT",
+      headers: { "Content-Type": "video/mp4" },
+      body: fileBuffer,
+    });
+    if (!uploadResp.ok) {
+      const errText = await uploadResp.text().catch(() => "");
+      throw new Error(`Signed-URL upload failed ${uploadResp.status}: ${errText.slice(0, 300)}`);
+    }
+
+    res.json({
+      success: true,
+      method: `waveform-${waveform_style}`,
+      duration_ms: Date.now() - startTime,
+      size_bytes: stat.size,
+    });
+  } catch (err) {
+    console.error(`[${jobId}] Error:`, err);
     res.status(500).json({
       success: false,
       error: err instanceof Error ? err.message : String(err),
