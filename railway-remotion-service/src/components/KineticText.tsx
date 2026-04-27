@@ -5,6 +5,7 @@
 import React from "react";
 import { useCurrentFrame, useVideoConfig, interpolate, spring } from "remotion";
 import { loadFont } from "@remotion/google-fonts/Oswald";
+import { getOverlayScale, getOverlayMaxWidth } from "./aspectSafe";
 
 const { fontFamily: oswald } = loadFont("normal", { weights: ["700"], subsets: ["latin"] });
 
@@ -18,10 +19,15 @@ interface Props {
 
 export const KineticText: React.FC<Props> = ({ text, style, color, animation, durationFrames }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, width: compWidth } = useVideoConfig();
 
-  // Font sizing based on style
-  const fontSize = style === "hero_bold" ? 96 : style === "section_title" ? 72 : 56;
+  // Aspect-aware sizing — see aspectSafe.ts. Portrait compositions get a
+  // smaller fontSize so a hero phrase like "BREAKING NEWS RIGHT NOW" doesn't
+  // bleed off the 1080px-wide canvas.
+  const scale = getOverlayScale(compWidth);
+  const maxWidth = getOverlayMaxWidth(compWidth);
+  const baseFontSize = style === "hero_bold" ? 96 : style === "section_title" ? 72 : 56;
+  const fontSize = Math.round(baseFontSize * scale);
 
   // Exit fade (last 15 frames)
   const exitAlpha = interpolate(frame, [durationFrames - 15, durationFrames], [1, 0], {
@@ -66,7 +72,10 @@ export const KineticText: React.FC<Props> = ({ text, style, color, animation, du
           textTransform: "uppercase",
           letterSpacing: "0.05em",
           textShadow: "0 4px 30px rgba(0,0,0,0.8), 0 2px 8px rgba(0,0,0,0.6)",
-          whiteSpace: "nowrap",
+          maxWidth,
+          textAlign: "center",
+          wordBreak: "break-word",
+          lineHeight: 1.1,
         }}>
           {text.slice(0, charsToShow)}
           <span style={{ opacity: frame % 10 > 5 ? 1 : 0 }}>|</span>
@@ -106,7 +115,10 @@ export const KineticText: React.FC<Props> = ({ text, style, color, animation, du
       textTransform: "uppercase",
       letterSpacing: "0.05em",
       textShadow: "0 4px 30px rgba(0,0,0,0.8), 0 2px 8px rgba(0,0,0,0.6)",
-      whiteSpace: "nowrap",
+      maxWidth,
+      textAlign: "center",
+      wordBreak: "break-word",
+      lineHeight: 1.1,
       filter: filterStyle || undefined,
     }}>
       {text}

@@ -6,6 +6,7 @@ import {
   spring,
   Sequence,
 } from "remotion";
+import { getOverlayScale } from "./aspectSafe";
 
 interface StatCalloutProps {
   startFrame: number;
@@ -25,7 +26,8 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
   position = "center",
 }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, width: compWidth } = useVideoConfig();
+  const scale = getOverlayScale(compWidth);
   const localFrame = frame - startFrame;
 
   if (localFrame < 0 || localFrame > durationFrames) return null;
@@ -41,7 +43,7 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
     ? interpolate(localFrame, [exitStart, durationFrames], [1, 0], { extrapolateRight: "clamp" })
     : 1;
 
-  const scale = interpolate(enterProgress, [0, 1], [0.3, 1]);
+  const animScale = interpolate(enterProgress, [0, 1], [0.3, 1]);
   const opacity = enterProgress * exitOpacity;
 
   const counterProgress = interpolate(localFrame, [0, 20], [0, 1], { extrapolateRight: "clamp" });
@@ -55,10 +57,10 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
 
   const positionStyle: React.CSSProperties =
     position === "left"
-      ? { left: "10%", top: "50%", transform: `translateY(-50%) scale(${scale})` }
+      ? { left: "10%", top: "50%", transform: `translateY(-50%) scale(${animScale})` }
       : position === "right"
-      ? { right: "10%", top: "50%", transform: `translateY(-50%) scale(${scale})` }
-      : { left: "50%", top: "50%", transform: `translate(-50%, -50%) scale(${scale})` };
+      ? { right: "10%", top: "50%", transform: `translateY(-50%) scale(${animScale})` }
+      : { left: "50%", top: "50%", transform: `translate(-50%, -50%) scale(${animScale})` };
 
   return (
     <div
@@ -76,21 +78,23 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
         style={{
           background: "rgba(0,0,0,0.75)",
           backdropFilter: "blur(12px)",
-          borderRadius: 16,
-          padding: "24px 48px",
+          borderRadius: Math.round(16 * scale),
+          padding: `${Math.round(24 * scale)}px ${Math.round(48 * scale)}px`,
           border: `2px solid ${color}`,
           boxShadow: `0 0 40px ${color}44, 0 8px 32px rgba(0,0,0,0.5)`,
           textAlign: "center",
+          maxWidth: "78%",
         }}
       >
         <div
           style={{
             fontFamily: "Oswald, sans-serif",
             fontWeight: 700,
-            fontSize: 72,
+            fontSize: Math.round(72 * scale),
             color,
             lineHeight: 1,
             letterSpacing: "-0.02em",
+            wordBreak: "break-word",
           }}
         >
           {displayNum}
@@ -99,12 +103,13 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
           style={{
             fontFamily: "Inter, sans-serif",
             fontWeight: 500,
-            fontSize: 22,
+            fontSize: Math.round(22 * scale),
             color: "#FFFFFF",
-            marginTop: 8,
+            marginTop: Math.round(8 * scale),
             textTransform: "uppercase",
             letterSpacing: "0.15em",
             opacity: 0.85,
+            wordBreak: "break-word",
           }}
         >
           {label}

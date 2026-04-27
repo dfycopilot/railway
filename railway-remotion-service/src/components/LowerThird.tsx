@@ -5,6 +5,7 @@ import {
   interpolate,
   spring,
 } from "remotion";
+import { getOverlayScale, getOverlayMaxWidth } from "./aspectSafe";
 
 interface LowerThirdProps {
   startFrame: number;
@@ -24,7 +25,12 @@ export const LowerThird: React.FC<LowerThirdProps> = ({
   position = "left",
 }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, width: compWidth } = useVideoConfig();
+  // Aspect-aware sizing — see aspectSafe.ts. Portrait (1080w) shrinks to ~0.56x
+  // so a long subtitle wraps inside the safe zone instead of bleeding off the
+  // canvas. We also drop `whiteSpace: nowrap` for the same reason.
+  const scale = getOverlayScale(compWidth);
+  const maxWidth = getOverlayMaxWidth(compWidth);
   const localFrame = frame - startFrame;
 
   if (localFrame < 0 || localFrame > durationFrames) return null;
@@ -73,8 +79,8 @@ export const LowerThird: React.FC<LowerThirdProps> = ({
       {/* Accent bar */}
       <div
         style={{
-          width: interpolate(barWidth, [0, 1], [0, 4]),
-          height: subtitle ? 72 : 48,
+          width: interpolate(barWidth, [0, 1], [0, Math.round(4 * scale)]),
+          height: Math.round((subtitle ? 72 : 48) * scale),
           backgroundColor: accentColor,
           position: "absolute",
           left: 0,
@@ -84,7 +90,7 @@ export const LowerThird: React.FC<LowerThirdProps> = ({
       />
 
       {/* Content container */}
-      <div style={{ marginLeft: 16 }}>
+      <div style={{ marginLeft: Math.round(16 * scale), maxWidth }}>
         {/* Title */}
         <div
           style={{
@@ -95,14 +101,15 @@ export const LowerThird: React.FC<LowerThirdProps> = ({
             style={{
               fontFamily: "Oswald, sans-serif",
               fontWeight: 700,
-              fontSize: 36,
+              fontSize: Math.round(36 * scale),
               color: "#FFFFFF",
               textTransform: "uppercase",
               letterSpacing: "0.05em",
               transform: `translateX(${interpolate(textSlide, [0, 1], [-200, 0])}px)`,
               opacity: textSlide,
               textShadow: "0 2px 12px rgba(0,0,0,0.7)",
-              whiteSpace: "nowrap",
+              wordBreak: "break-word",
+              lineHeight: 1.15,
             }}
           >
             {title}
@@ -116,13 +123,14 @@ export const LowerThird: React.FC<LowerThirdProps> = ({
               style={{
                 fontFamily: "Inter, sans-serif",
                 fontWeight: 400,
-                fontSize: 20,
+                fontSize: Math.round(20 * scale),
                 color: "#CCCCCC",
-                marginTop: 4,
+                marginTop: Math.round(4 * scale),
                 transform: `translateX(${interpolate(subtitleSlide, [0, 1], [-200, 0])}px)`,
                 opacity: subtitleSlide,
                 textShadow: "0 2px 8px rgba(0,0,0,0.6)",
-                whiteSpace: "nowrap",
+                wordBreak: "break-word",
+                lineHeight: 1.3,
               }}
             >
               {subtitle}
@@ -135,7 +143,7 @@ export const LowerThird: React.FC<LowerThirdProps> = ({
       <div
         style={{
           position: "absolute",
-          inset: "-8px -24px -8px -8px",
+          inset: `-${Math.round(8 * scale)}px -${Math.round(24 * scale)}px -${Math.round(8 * scale)}px -${Math.round(8 * scale)}px`,
           background: "linear-gradient(90deg, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.4) 70%, transparent 100%)",
           borderRadius: 8,
           zIndex: -1,
