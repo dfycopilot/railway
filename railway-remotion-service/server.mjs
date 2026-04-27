@@ -2,6 +2,7 @@
  * Railway Remotion Full Composition Service
  *
  * POST /render-composition  — accepts a full composition spec, renders via Remotion, uploads MP4
+ * POST /extract-frames      — extracts N evenly-spaced frames for AI vision (Viral Clips Mode)
  * POST /render-overlay      — legacy overlay-only endpoint (backwards compat)
  * GET  /health              — health check
  */
@@ -13,6 +14,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import { spawn } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -204,10 +206,182 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
   })();
 });
 
+// ---------- POST /extract-frames ----------
+//
+// Extracts N evenly-spaced sample frames from a source video. Used by the
+// AI Video Editor's Viral Clips Mode so Sonnet can SEE the video — energy,
+// gestures, slides, on-screen text — when picking which segments are worth
+// turning into shareable clips. Transcript-only selection misses ~30% of
+// what makes a clip pop visually.
+//
+// Request body:
+//   {
+//     source_video_url: string,             // public URL of source mp4
+//     num_frames?: number,                  // default 30, capped at 60
+//     uploads: Array<{                      // pre-signed upload targets,
+//       signed_url: string,                 //   one per frame, in order
+//       public_url: string,                 //   what the AI will fetch
+//     }>,
+//   }
+//
+// Response (synchronous): { frame_urls: string[], duration_ms: number }
+//
+// Implementation: ffmpeg `select` filter at evenly-spaced timestamps,
+// scaled to 512px wide (low-res keeps vision token cost down without
+// hurting selection quality — Sonnet doesn't need pixel-perfect frames to
+// judge "is the speaker animated here, are slides visible").
+app.post("/extract-frames", authMiddleware, async (req, res) => {
+  const startTime = Date.now();
+  const body = req.body || {};
+  const sourceUrl = body.source_video_url || body.sourceVideoUrl;
+  const requestedFrames = Number(body.num_frames || body.numFrames || 30);
+  const numFrames = Math.max(1, Math.min(60, requestedFrames));
+  const uploads = Array.isArray(body.uploads) ? body.uploads : [];
+
+  if (!sourceUrl) {
+    return res.status(400).json({ error: "source_video_url is required" });
+  }
+  if (uploads.length < numFrames) {
+    return res.status(400).json({
+      error: `Need ${numFrames} signed upload targets, got ${uploads.length}`,
+    });
+  }
+
+  const jobId = crypto.randomUUID();
+  const tmpDir = `/tmp/frames_${jobId}`;
+  const tmpVideo = `${tmpDir}/source.mp4`;
+
+  try {
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    // ── 1. Download the source video ──
+    console.log(`[extract-frames] Downloading source: ${sourceUrl}`);
+    const dlResp = await fetch(sourceUrl);
+    if (!dlResp.ok) {
+      throw new Error(`Failed to download source: ${dlResp.status}`);
+    }
+    const dlBuf = Buffer.from(await dlResp.arrayBuffer());
+    fs.writeFileSync(tmpVideo, dlBuf);
+    console.log(`[extract-frames] Downloaded ${(dlBuf.length / 1024 / 1024).toFixed(1)}MB`);
+
+    // ── 2. Probe duration so we can pick evenly-spaced timestamps ──
+    const duration = await probeDurationSeconds(tmpVideo);
+    if (!duration || duration < 1) {
+      throw new Error(`Could not determine video duration (got ${duration}s)`);
+    }
+    console.log(`[extract-frames] Video duration: ${duration.toFixed(1)}s`);
+
+    // Pick timestamps: avoid the very first/last seconds (often black frames
+    // or pre-roll). Spread the rest evenly.
+    const margin = Math.min(2, duration * 0.05);
+    const usable = Math.max(duration - margin * 2, 1);
+    const timestamps = Array.from({ length: numFrames }, (_, i) => {
+      // For 1 frame, pick the middle. For N frames, evenly distribute.
+      if (numFrames === 1) return margin + usable / 2;
+      return margin + (usable * i) / (numFrames - 1);
+    });
+
+    // ── 3. Extract each frame ──
+    const framePaths = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const ts = timestamps[i];
+      const outPath = `${tmpDir}/frame_${String(i).padStart(3, "0")}.jpg`;
+      await runFfmpegFrame(tmpVideo, ts, outPath);
+      framePaths.push(outPath);
+    }
+    console.log(`[extract-frames] Extracted ${framePaths.length} frames`);
+
+    // ── 4. Upload each via the provided signed URLs ──
+    const frameUrls = [];
+    for (let i = 0; i < framePaths.length; i++) {
+      const target = uploads[i];
+      if (!target?.signed_url || !target?.public_url) {
+        throw new Error(`Upload target ${i} is missing signed_url or public_url`);
+      }
+      const buf = fs.readFileSync(framePaths[i]);
+      const upResp = await fetch(target.signed_url, {
+        method: "PUT",
+        headers: { "Content-Type": "image/jpeg" },
+        body: buf,
+      });
+      if (!upResp.ok) {
+        const errText = await upResp.text().catch(() => "");
+        throw new Error(`Frame ${i} upload failed: ${upResp.status} ${errText}`);
+      }
+      frameUrls.push(target.public_url);
+    }
+
+    // ── 5. Cleanup ──
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+
+    return res.json({
+      frame_urls: frameUrls,
+      frame_count: frameUrls.length,
+      duration_seconds: duration,
+      duration_ms: Date.now() - startTime,
+    });
+  } catch (err) {
+    console.error(`[extract-frames] Failed:`, err);
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    return res.status(500).json({ error: err.message || "Frame extraction failed" });
+  }
+});
+
 // ---------- Legacy overlay endpoint ----------
 app.post("/render-overlay", authMiddleware, async (req, res) => {
   res.json({ render_id: crypto.randomUUID(), status: "legacy_overlay_accepted" });
 });
+
+// ---------- ffmpeg helpers ----------
+
+// ffprobe equivalent — uses ffmpeg's stderr output to extract Duration. We
+// avoid pulling ffprobe separately since the Dockerfile only installs ffmpeg.
+function probeDurationSeconds(videoPath) {
+  return new Promise((resolve) => {
+    const proc = spawn("ffmpeg", ["-i", videoPath, "-f", "null", "-"], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    proc.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    proc.on("close", () => {
+      const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+      if (!match) return resolve(0);
+      const h = parseInt(match[1], 10);
+      const m = parseInt(match[2], 10);
+      const s = parseFloat(match[3]);
+      resolve(h * 3600 + m * 60 + s);
+    });
+    proc.on("error", () => resolve(0));
+  });
+}
+
+// Extract a single frame at `timestampSec`, scaled to 512px wide, saved as JPEG.
+// The -ss before -i is fast (keyframe seek); the q:v 4 setting gives reasonable
+// JPEG quality without inflating file size — Anthropic's vision API doesn't
+// reward higher resolution for this kind of "what's happening on screen" check.
+function runFfmpegFrame(videoPath, timestampSec, outputPath) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("ffmpeg", [
+      "-y",
+      "-ss", String(timestampSec),
+      "-i", videoPath,
+      "-frames:v", "1",
+      "-vf", "scale=512:-2",
+      "-q:v", "4",
+      outputPath,
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (c) => { stderr += c.toString(); });
+    proc.on("close", (code) => {
+      if (code === 0 && fs.existsSync(outputPath)) {
+        resolve();
+      } else {
+        reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-300)}`));
+      }
+    });
+    proc.on("error", reject);
+  });
+}
 
 // ---------- Helpers ----------
 async function reportProgress(callbackUrl, headers, jobId, progress) {
