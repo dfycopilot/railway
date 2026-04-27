@@ -14,6 +14,7 @@ import { Overlays } from "./components/Overlays";
 import { KineticText } from "./components/KineticText";
 import { LowerThird } from "./components/LowerThird";
 import { StatCallout } from "./components/StatCallout";
+import { BadgeCard } from "./components/BadgeCard";
 import { LottieGraphic } from "./components/LottieGraphic";
 import { CompanionPanel, type CompanionSpec } from "./components/CompanionPanel";
 import { getLayoutSlots, normalizeLayout } from "./components/SceneLayout";
@@ -403,6 +404,45 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
                     color={anim?.color || "#FFD700"}
                     position={position}
                     aesthetic={animAesthetic}
+                  />
+                </AbsoluteFill>
+              </Sequence>
+            );
+          }
+          case "badge_card": {
+            // Themed callout card with structured icon/category/title/tagline.
+            // Two input shapes are accepted:
+            //   1. Single-card shorthand: anim.title / anim.category / anim.tagline / anim.icon
+            //   2. Stack: anim.cards = [{title, category, ...}, ...]
+            const cards = Array.isArray(anim?.cards) ? anim.cards : undefined;
+            const singleTitle = anim?.title || anim?.text || anim?.value || "";
+            if (!cards && !singleTitle) return null;
+            const positionRaw = String(anim?.position || "center");
+            const position: "top" | "center" | "bottom" =
+              positionRaw === "top" ? "top" : positionRaw === "bottom" ? "bottom" : "center";
+            // Map free-form aesthetic strings to BadgeCard's variants.
+            const aestheticRaw = String(anim?.aesthetic || anim?.style || "default").toLowerCase();
+            const aesthetic =
+              aestheticRaw === "glass" ? "glass"
+              : aestheticRaw === "solid_red" || aestheticRaw === "red" ? "solid_red"
+              : aestheticRaw === "solid_orange" || aestheticRaw === "orange" ? "solid_orange"
+              : aestheticRaw === "solid_green" || aestheticRaw === "green" ? "solid_green"
+              : aestheticRaw === "solid_blue" || aestheticRaw === "blue" ? "solid_blue"
+              : "default";
+            return (
+              <Sequence key={sequenceKey} from={start} durationInFrames={dur}>
+                <AbsoluteFill style={{ pointerEvents: "none" }}>
+                  <BadgeCard
+                    startFrame={0}
+                    durationFrames={dur}
+                    cards={cards}
+                    category={anim?.category}
+                    title={singleTitle}
+                    tagline={anim?.tagline || anim?.subtitle}
+                    icon={anim?.icon}
+                    accentColor={anim?.color || anim?.accentColor}
+                    aesthetic={aesthetic as any}
+                    position={position}
                   />
                 </AbsoluteFill>
               </Sequence>

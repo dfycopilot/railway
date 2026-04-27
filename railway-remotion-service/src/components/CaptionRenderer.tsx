@@ -171,6 +171,30 @@ const PRESETS: Record<string, PresetStyle> = {
     stroke_width: 0,
     letter_spacing: "0.04em",
   },
+  // KEYWORD EMPHASIS — modeled on the AgencyBloc-style reference Eric showed.
+  // Prints 1–2 words at a time, very large, no pill background, with a heavy
+  // stroke + drop-shadow so the text reads cleanly over any backdrop. The
+  // pacing makes every word feel like a hook — perfect for short-form social
+  // talking-head clips. Position lives in the lower third (not glued to the
+  // edge) so the speaker's hands/gestures still carry energy beneath.
+  keyword: {
+    font_family: "'Oswald', 'Arial Black', 'Impact', sans-serif",
+    font_weight: 800,
+    font_size_ratio: 0.082,
+    text_transform: "uppercase",
+    text_color: "#FFFFFF",
+    highlight_color: "#FFD700",
+    bg_style: "none",
+    bg_color: "transparent",
+    position: "bottom",
+    broll_position: "bottom",
+    animation: "pop_in",
+    word_by_word: true,
+    max_words_per_chunk: 2,
+    safe_zone: { portrait_marginBottom: 0.30, landscape_marginBottom: 0.18, square_marginBottom: 0.22 },
+    stroke_width: 5,
+    letter_spacing: "0.01em",
+  },
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
