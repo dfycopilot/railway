@@ -3,6 +3,7 @@ import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring } fr
 import { loadFont as loadOswald } from "@remotion/google-fonts/Oswald";
 import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
 import { getOverlayScale, getOverlayMaxWidth } from "./aspectSafe";
+import { GlassCard } from "./GlassCard";
 
 const { fontFamily: oswaldFamily } = loadOswald("normal", { weights: ["700"], subsets: ["latin"] });
 const { fontFamily: interFamily } = loadInter("normal", { weights: ["400"], subsets: ["latin"] });
@@ -17,6 +18,14 @@ interface TitleCardProps {
    * never fades the title out (or fades it the wrong amount).
    */
   durationFrames?: number;
+  /**
+   * Visual treatment for the title card.
+   *   - "default" : transparent (text floats over the video) — legacy look
+   *   - "glass"   : wraps content in a liquid-glass card (premium iOS / visionOS aesthetic)
+   */
+  aesthetic?: "default" | "glass";
+  /** Hex accent for the glass border gradient. Ignored when aesthetic="default". */
+  accentColor?: string;
 }
 
 export const TitleCard: React.FC<TitleCardProps> = ({
@@ -24,6 +33,8 @@ export const TitleCard: React.FC<TitleCardProps> = ({
   subtitle,
   animation = "slam_in",
   durationFrames,
+  aesthetic = "default",
+  accentColor = "#FFD700",
 }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames: compDuration, width: compWidth } = useVideoConfig();
@@ -83,31 +94,51 @@ export const TitleCard: React.FC<TitleCardProps> = ({
 
   const anim = getAnimation();
 
+  const titleNode = (
+    <div style={{
+      fontFamily: oswaldFamily,
+      fontSize: Math.round(72 * scale),
+      color: "white",
+      textShadow: aesthetic === "glass" ? "none" : "0 4px 20px rgba(0,0,0,0.7)",
+      lineHeight: 1.1,
+      wordBreak: "break-word",
+    }}>
+      {title}
+    </div>
+  );
+
+  const subtitleNode = subtitle ? (
+    <div style={{
+      fontFamily: interFamily,
+      fontSize: Math.round(32 * scale),
+      color: "rgba(255,255,255,0.85)",
+      marginTop: Math.round(16 * scale),
+      textShadow: aesthetic === "glass" ? "none" : "0 2px 10px rgba(0,0,0,0.5)",
+      lineHeight: 1.3,
+      wordBreak: "break-word",
+    }}>
+      {subtitle}
+    </div>
+  ) : null;
+
   return (
     <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", opacity: exitOpacity }}>
       <div style={{ textAlign: "center", maxWidth, ...anim }}>
-        <div style={{
-          fontFamily: oswaldFamily,
-          fontSize: Math.round(72 * scale),
-          color: "white",
-          textShadow: "0 4px 20px rgba(0,0,0,0.7)",
-          lineHeight: 1.1,
-          wordBreak: "break-word",
-        }}>
-          {title}
-        </div>
-        {subtitle && (
-          <div style={{
-            fontFamily: interFamily,
-            fontSize: Math.round(32 * scale),
-            color: "rgba(255,255,255,0.85)",
-            marginTop: Math.round(16 * scale),
-            textShadow: "0 2px 10px rgba(0,0,0,0.5)",
-            lineHeight: 1.3,
-            wordBreak: "break-word",
-          }}>
-            {subtitle}
-          </div>
+        {aesthetic === "glass" ? (
+          <GlassCard
+            tone="dark"
+            accentColor={accentColor}
+            radius={Math.round(28 * scale)}
+            padding={`${Math.round(36 * scale)}px ${Math.round(48 * scale)}px`}
+          >
+            {titleNode}
+            {subtitleNode}
+          </GlassCard>
+        ) : (
+          <>
+            {titleNode}
+            {subtitleNode}
+          </>
         )}
       </div>
     </AbsoluteFill>

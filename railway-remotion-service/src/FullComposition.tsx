@@ -14,6 +14,9 @@ import { Overlays } from "./components/Overlays";
 import { KineticText } from "./components/KineticText";
 import { LowerThird } from "./components/LowerThird";
 import { StatCallout } from "./components/StatCallout";
+import { LottieGraphic } from "./components/LottieGraphic";
+import { CompanionPanel, type CompanionSpec } from "./components/CompanionPanel";
+import { getLayoutSlots, normalizeLayout } from "./components/SceneLayout";
 
 /**
  * FullComposition v3 — Sequence-based timeline.
@@ -108,6 +111,14 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
   const captionPreset = specData.caption_preset || specData.captionPreset || "tiktok";
   const captionConfig = specData.caption_config || specData.captionConfig || undefined;
 
+  // Top-level aesthetic preset. Each text animation can override with its own
+  // `aesthetic` field. "glass" wraps text components in liquid-glass cards;
+  // "default" preserves legacy chrome (transparent text + outlined boxes).
+  const aestheticDefault: "default" | "glass" =
+    String(specData.aesthetic || specData.aestheticPreset || "").toLowerCase() === "glass"
+      ? "glass"
+      : "default";
+
   const sourceVideoUrl = firstUrl(
     specData.source_video_url,
     specData.sourceVideoUrl,
@@ -147,7 +158,7 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
-      {/* ═══ LAYER 1: Main video scenes (absolute positioning) ═══ */}
+      {/* ═══ LAYER 1: Main video scenes — with optional split/PIP layouts ═══ */}
       {mainScenes.map(({ raw: scene, start, dur }, i) => {
         const url = firstUrl(
           scene?.videoUrl,
@@ -160,20 +171,43 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
         );
         if (!url) return null;
 
+        // Resolve layout. Default fullscreen so legacy plans render unchanged.
+        const layout = normalizeLayout(scene?.layout);
+        const slots = getLayoutSlots(layout);
+        const companion: CompanionSpec | null =
+          scene?.companion && typeof scene.companion === "object"
+            ? { durationFrames: dur, ...scene.companion }
+            : null;
+
+        // For PIP layouts the order matters — speaker fills the frame, then
+        // the small inset draws on top. For split layouts both halves are
+        // siblings positioned absolutely.
+        const isPip = layout.startsWith("pip_");
+
         return (
           <Sequence
-            key={`main-${i}-${start}`}
+            key={`main-${i}-${start}-${layout}`}
             from={start}
             durationInFrames={dur}
           >
-            <VideoSegment
-              videoUrl={url}
-              trimStart={num(scene?.trim_start ?? scene?.trimStart, 0)}
-              trimEnd={num(scene?.trim_end ?? scene?.trimEnd, 0)}
-              effects={scene?.effects}
-              sceneDurationFrames={dur}
-              volume={0}
-            />
+            {/* Speaker video — sized to its slot (full frame for fullscreen + PIP) */}
+            <div style={slots.main}>
+              <VideoSegment
+                videoUrl={url}
+                trimStart={num(scene?.trim_start ?? scene?.trimStart, 0)}
+                trimEnd={num(scene?.trim_end ?? scene?.trimEnd, 0)}
+                effects={scene?.effects}
+                sceneDurationFrames={dur}
+                volume={0}
+              />
+            </div>
+
+            {/* Companion — split half, or PIP inset, or nothing */}
+            {slots.companion && companion && (
+              <div style={{ ...slots.companion, zIndex: isPip ? 5 : 1 }}>
+                <CompanionPanel companion={companion} />
+              </div>
+            )}
           </Sequence>
         );
       })}
@@ -244,6 +278,13 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
         const dur = Math.max(1, Math.round(num(anim?.duration_frames ?? anim?.durationFrames, 90)));
         const type = String(anim?.type || "").toLowerCase();
         const sequenceKey = `anim-${i}-${start}-${type}`;
+        // Resolve aesthetic — per-animation override beats the project default.
+        const animAesthetic: "default" | "glass" =
+          String(anim?.aesthetic || "").toLowerCase() === "glass"
+            ? "glass"
+            : String(anim?.aesthetic || "").toLowerCase() === "default"
+            ? "default"
+            : aestheticDefault;
 
         switch (type) {
           case "title_card": {
@@ -255,6 +296,8 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
                     subtitle={anim?.subtitle || ""}
                     animation={anim?.animation || "slam_in"}
                     durationFrames={dur}
+                    aesthetic={animAesthetic}
+                    accentColor={anim?.color || anim?.accentColor || "#FFD700"}
                   />
                 </AbsoluteFill>
               </Sequence>
@@ -290,7 +333,54 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
                     subtitle={anim?.subtitle || ""}
                     accentColor={anim?.color || anim?.accentColor || "#FFD700"}
                     position={anim?.position === "center" ? "center" : "left"}
+                    aesthetic={animAesthetic}
                   />
+                </AbsoluteFill>
+              </Sequence>
+            );
+          }
+          case "lottie":
+          case "motion_graphic": {
+            // Anchor: 9 positions (corners + edges + center). Defaults to
+            // top_right so the speaker's face usually isn't covered.
+            const positionRaw = String(anim?.position || "top_right").toLowerCase();
+            const sizePct = Number.isFinite(num(anim?.size_pct))
+              ? Math.max(8, Math.min(60, num(anim?.size_pct, 18)))
+              : 18;
+            const inset = "5%";
+            const positionStyle: any = (() => {
+              switch (positionRaw) {
+                case "top_left": return { top: inset, left: inset };
+                case "top_center": return { top: inset, left: "50%", transform: "translateX(-50%)" };
+                case "top_right": return { top: inset, right: inset };
+                case "middle_left": return { top: "50%", left: inset, transform: "translateY(-50%)" };
+                case "center": return { top: "50%", left: "50%", transform: "translate(-50%, -50%)" };
+                case "middle_right": return { top: "50%", right: inset, transform: "translateY(-50%)" };
+                case "bottom_left": return { bottom: inset, left: inset };
+                case "bottom_center": return { bottom: inset, left: "50%", transform: "translateX(-50%)" };
+                case "bottom_right": return { bottom: inset, right: inset };
+                default: return { top: inset, right: inset };
+              }
+            })();
+            return (
+              <Sequence key={sequenceKey} from={start} durationInFrames={dur}>
+                <AbsoluteFill style={{ pointerEvents: "none" }}>
+                  <div
+                    style={{
+                      position: "absolute",
+                      width: `${sizePct}%`,
+                      aspectRatio: "1 / 1",
+                      ...positionStyle,
+                    }}
+                  >
+                    <LottieGraphic
+                      name={anim?.name || anim?.lottie_name}
+                      url={anim?.url || anim?.lottie_url}
+                      speed={Number.isFinite(num(anim?.speed)) ? num(anim?.speed, 1) : 1}
+                      accentColor={anim?.color || anim?.accentColor || "#FFD700"}
+                      loop={anim?.loop !== false}
+                    />
+                  </div>
                 </AbsoluteFill>
               </Sequence>
             );
@@ -312,6 +402,7 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
                     label={String(label)}
                     color={anim?.color || "#FFD700"}
                     position={position}
+                    aesthetic={animAesthetic}
                   />
                 </AbsoluteFill>
               </Sequence>

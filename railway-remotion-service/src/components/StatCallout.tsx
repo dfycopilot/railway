@@ -7,6 +7,7 @@ import {
   Sequence,
 } from "remotion";
 import { getOverlayScale } from "./aspectSafe";
+import { GlassCard } from "./GlassCard";
 
 interface StatCalloutProps {
   startFrame: number;
@@ -15,6 +16,7 @@ interface StatCalloutProps {
   label: string;
   color?: string;
   position?: "center" | "left" | "right";
+  aesthetic?: "default" | "glass";
 }
 
 export const StatCallout: React.FC<StatCalloutProps> = ({
@@ -24,6 +26,7 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
   label,
   color = "#FFD700",
   position = "center",
+  aesthetic = "default",
 }) => {
   const frame = useCurrentFrame();
   const { fps, width: compWidth } = useVideoConfig();
@@ -74,47 +77,86 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
         zIndex: 50,
       }}
     >
-      <div
-        style={{
-          background: "rgba(0,0,0,0.75)",
-          backdropFilter: "blur(12px)",
-          borderRadius: Math.round(16 * scale),
-          padding: `${Math.round(24 * scale)}px ${Math.round(48 * scale)}px`,
-          border: `2px solid ${color}`,
-          boxShadow: `0 0 40px ${color}44, 0 8px 32px rgba(0,0,0,0.5)`,
-          textAlign: "center",
-          maxWidth: "78%",
-        }}
-      >
+      {aesthetic === "glass" ? (
+        <GlassCard
+          tone="dark"
+          accentColor={color}
+          radius={Math.round(20 * scale)}
+          padding={`${Math.round(28 * scale)}px ${Math.round(52 * scale)}px`}
+          style={{ maxWidth: "78%" }}
+        >
+          <div
+            style={{
+              fontFamily: "Oswald, sans-serif",
+              fontWeight: 700,
+              fontSize: Math.round(72 * scale),
+              color,
+              lineHeight: 1,
+              letterSpacing: "-0.02em",
+              wordBreak: "break-word",
+            }}
+          >
+            {displayNum}
+          </div>
+          <div
+            style={{
+              fontFamily: "Inter, sans-serif",
+              fontWeight: 500,
+              fontSize: Math.round(22 * scale),
+              color: "#FFFFFF",
+              marginTop: Math.round(8 * scale),
+              textTransform: "uppercase",
+              letterSpacing: "0.15em",
+              opacity: 0.9,
+              wordBreak: "break-word",
+            }}
+          >
+            {label}
+          </div>
+        </GlassCard>
+      ) : (
         <div
           style={{
-            fontFamily: "Oswald, sans-serif",
-            fontWeight: 700,
-            fontSize: Math.round(72 * scale),
-            color,
-            lineHeight: 1,
-            letterSpacing: "-0.02em",
-            wordBreak: "break-word",
+            background: "rgba(0,0,0,0.75)",
+            backdropFilter: "blur(12px)",
+            borderRadius: Math.round(16 * scale),
+            padding: `${Math.round(24 * scale)}px ${Math.round(48 * scale)}px`,
+            border: `2px solid ${color}`,
+            boxShadow: `0 0 40px ${color}44, 0 8px 32px rgba(0,0,0,0.5)`,
+            textAlign: "center",
+            maxWidth: "78%",
           }}
         >
-          {displayNum}
+          <div
+            style={{
+              fontFamily: "Oswald, sans-serif",
+              fontWeight: 700,
+              fontSize: Math.round(72 * scale),
+              color,
+              lineHeight: 1,
+              letterSpacing: "-0.02em",
+              wordBreak: "break-word",
+            }}
+          >
+            {displayNum}
+          </div>
+          <div
+            style={{
+              fontFamily: "Inter, sans-serif",
+              fontWeight: 500,
+              fontSize: Math.round(22 * scale),
+              color: "#FFFFFF",
+              marginTop: Math.round(8 * scale),
+              textTransform: "uppercase",
+              letterSpacing: "0.15em",
+              opacity: 0.85,
+              wordBreak: "break-word",
+            }}
+          >
+            {label}
+          </div>
         </div>
-        <div
-          style={{
-            fontFamily: "Inter, sans-serif",
-            fontWeight: 500,
-            fontSize: Math.round(22 * scale),
-            color: "#FFFFFF",
-            marginTop: Math.round(8 * scale),
-            textTransform: "uppercase",
-            letterSpacing: "0.15em",
-            opacity: 0.85,
-            wordBreak: "break-word",
-          }}
-        >
-          {label}
-        </div>
-      </div>
+      )}
     </div>
   );
 };

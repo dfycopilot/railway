@@ -6,6 +6,7 @@ import {
   spring,
 } from "remotion";
 import { getOverlayScale, getOverlayMaxWidth } from "./aspectSafe";
+import { GlassCard } from "./GlassCard";
 
 interface LowerThirdProps {
   startFrame: number;
@@ -14,6 +15,7 @@ interface LowerThirdProps {
   subtitle?: string;
   accentColor?: string;
   position?: "left" | "center";
+  aesthetic?: "default" | "glass";
 }
 
 export const LowerThird: React.FC<LowerThirdProps> = ({
@@ -23,6 +25,7 @@ export const LowerThird: React.FC<LowerThirdProps> = ({
   subtitle,
   accentColor = "#FFD700",
   position = "left",
+  aesthetic = "default",
 }) => {
   const frame = useCurrentFrame();
   const { fps, width: compWidth } = useVideoConfig();
@@ -65,6 +68,70 @@ export const LowerThird: React.FC<LowerThirdProps> = ({
     position === "center"
       ? { left: "50%", transform: `translateX(-50%) translateX(${exitX}px)` }
       : { left: "6%" , transform: `translateX(${exitX}px)` };
+
+  // Glass variant — replaces the accent bar + dark gradient pill with a
+  // GlassCard wrapper. Same animation in/out, just a different chrome.
+  if (aesthetic === "glass") {
+    return (
+      <div
+        style={{
+          position: "absolute",
+          bottom: "10%",
+          ...alignStyle,
+          opacity: exitOpacity,
+          zIndex: 50,
+          maxWidth,
+        }}
+      >
+        <div
+          style={{
+            transform: `translateX(${interpolate(textSlide, [0, 1], [-160, 0])}px)`,
+            opacity: textSlide,
+          }}
+        >
+          <GlassCard
+            tone="dark"
+            accentColor={accentColor}
+            radius={Math.round(20 * scale)}
+            padding={`${Math.round(18 * scale)}px ${Math.round(28 * scale)}px`}
+            centerContent={false}
+          >
+            <div
+              style={{
+                fontFamily: "Oswald, sans-serif",
+                fontWeight: 700,
+                fontSize: Math.round(36 * scale),
+                color: "#FFFFFF",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                wordBreak: "break-word",
+                lineHeight: 1.15,
+              }}
+            >
+              {title}
+            </div>
+            {subtitle && (
+              <div
+                style={{
+                  fontFamily: "Inter, sans-serif",
+                  fontWeight: 400,
+                  fontSize: Math.round(20 * scale),
+                  color: "rgba(255,255,255,0.85)",
+                  marginTop: Math.round(6 * scale),
+                  wordBreak: "break-word",
+                  lineHeight: 1.3,
+                  transform: `translateX(${interpolate(subtitleSlide, [0, 1], [-160, 0])}px)`,
+                  opacity: subtitleSlide,
+                }}
+              >
+                {subtitle}
+              </div>
+            )}
+          </GlassCard>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
