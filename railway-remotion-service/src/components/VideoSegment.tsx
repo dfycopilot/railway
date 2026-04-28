@@ -55,13 +55,16 @@ export const VideoSegment: React.FC<VideoSegmentProps> = ({
   volume = 0,
   cropAnchor,
 }) => {
-  // Default to heavy face-bias anchor (50% horizontal, 30% vertical) so
-  // that when the source has to be cropped to match output aspect, the
-  // face stays in frame. Talking-head shooters frame eyes in the upper
-  // third — 0.3 keeps that band centered post-crop. (0.4 wasn't enough;
-  // Eric's 4/28 render still trimmed scalp.)
+  // Default to maximum face-bias anchor (50% horizontal, 20% vertical).
+  // Talking-head sources commonly frame eyes 25-35% from the top of frame.
+  // With objectFit:cover, an objectPosition Y of 20% pulls the visible
+  // window toward the top of the source so faces+hair survive the crop
+  // even on portrait sources squeezed into 1:1 square output.
+  // Progression so far: 0.5 (geometric) → 0.4 (mild) → 0.3 (medium) → 0.2.
+  // If 0.2 still trims, the source itself frames the face at the very
+  // top edge and only true face-detect can save it.
   const anchorX = clampFrac(cropAnchor?.x, 0.5);
-  const anchorY = clampFrac(cropAnchor?.y, 0.3);
+  const anchorY = clampFrac(cropAnchor?.y, 0.2);
   const frame = useCurrentFrame();
   const { fps, durationInFrames: compDuration } = useVideoConfig();
 
