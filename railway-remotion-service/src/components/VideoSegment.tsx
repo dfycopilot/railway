@@ -25,11 +25,14 @@ interface VideoSegmentProps {
   volume?: number;
   /**
    * Where to anchor the crop window when source aspect ≠ output aspect.
-   * x and y are 0..1 fractions of the source frame. Default { x: 0.5, y: 0.4 }
-   * — face-bias for talking-head content (talking heads are framed with the
-   * face in the upper-middle, so a true 0.5/0.5 center-crop chops foreheads
-   * when rotating landscape→square or any portrait crop-down). Set to
-   * { x: 0.5, y: 0.5 } explicitly to opt out of the bias.
+   * x and y are 0..1 fractions of the source frame. Default { x: 0.5, y: 0.3 }
+   * — heavy face-bias for talking-head content. Talking heads are framed
+   * with eyes in the upper third (rule of thirds), so 0.4 wasn't aggressive
+   * enough — Eric's 4/28 square render still trimmed his hair. 0.3 anchors
+   * the crop window so the upper third (face) stays in frame even when the
+   * source is portrait-tall and getting compressed to square. Set to
+   * { x: 0.5, y: 0.5 } explicitly to opt out of the bias for non-talking-head
+   * content.
    */
   cropAnchor?: { x?: number; y?: number };
 }
@@ -52,12 +55,13 @@ export const VideoSegment: React.FC<VideoSegmentProps> = ({
   volume = 0,
   cropAnchor,
 }) => {
-  // Default to face-bias anchor (50% horizontal, 40% vertical) so that when
-  // the source has to be cropped to match output aspect, the face stays in
-  // frame. Talking-head shooters frame faces above the geometric center;
-  // a literal 50/50 center-crop chops foreheads.
+  // Default to heavy face-bias anchor (50% horizontal, 30% vertical) so
+  // that when the source has to be cropped to match output aspect, the
+  // face stays in frame. Talking-head shooters frame eyes in the upper
+  // third — 0.3 keeps that band centered post-crop. (0.4 wasn't enough;
+  // Eric's 4/28 render still trimmed scalp.)
   const anchorX = clampFrac(cropAnchor?.x, 0.5);
-  const anchorY = clampFrac(cropAnchor?.y, 0.4);
+  const anchorY = clampFrac(cropAnchor?.y, 0.3);
   const frame = useCurrentFrame();
   const { fps, durationInFrames: compDuration } = useVideoConfig();
 
