@@ -200,6 +200,7 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
                 effects={scene?.effects}
                 sceneDurationFrames={dur}
                 volume={0}
+                cropAnchor={scene?.crop_anchor ?? scene?.cropAnchor}
               />
             </div>
 

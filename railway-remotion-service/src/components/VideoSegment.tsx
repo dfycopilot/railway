@@ -23,6 +23,15 @@ interface VideoSegmentProps {
    */
   sceneDurationFrames?: number;
   volume?: number;
+  /**
+   * Where to anchor the crop window when source aspect ≠ output aspect.
+   * x and y are 0..1 fractions of the source frame. Default { x: 0.5, y: 0.4 }
+   * — face-bias for talking-head content (talking heads are framed with the
+   * face in the upper-middle, so a true 0.5/0.5 center-crop chops foreheads
+   * when rotating landscape→square or any portrait crop-down). Set to
+   * { x: 0.5, y: 0.5 } explicitly to opt out of the bias.
+   */
+  cropAnchor?: { x?: number; y?: number };
 }
 
 /**
@@ -41,7 +50,14 @@ export const VideoSegment: React.FC<VideoSegmentProps> = ({
   effects,
   sceneDurationFrames,
   volume = 0,
+  cropAnchor,
 }) => {
+  // Default to face-bias anchor (50% horizontal, 40% vertical) so that when
+  // the source has to be cropped to match output aspect, the face stays in
+  // frame. Talking-head shooters frame faces above the geometric center;
+  // a literal 50/50 center-crop chops foreheads.
+  const anchorX = clampFrac(cropAnchor?.x, 0.5);
+  const anchorY = clampFrac(cropAnchor?.y, 0.4);
   const frame = useCurrentFrame();
   const { fps, durationInFrames: compDuration } = useVideoConfig();
 
@@ -119,7 +135,13 @@ export const VideoSegment: React.FC<VideoSegmentProps> = ({
         <Video
           src={videoUrl}
           objectFit="cover"
-          style={{ width: "100%", height: "100%" }}
+          style={{
+            width: "100%",
+            height: "100%",
+            // Slide the cropped window so talking-head faces stay in frame
+            // when source aspect ≠ output aspect. No effect when aspects match.
+            objectPosition: `${(anchorX * 100).toFixed(2)}% ${(anchorY * 100).toFixed(2)}%`,
+          }}
           trimBefore={trimBeforeFrames}
           trimAfter={trimAfterFrames}
           volume={volume}
@@ -128,6 +150,13 @@ export const VideoSegment: React.FC<VideoSegmentProps> = ({
     </AbsoluteFill>
   );
 };
+
+function clampFrac(v: number | undefined, fallback: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
+  if (v < 0) return 0;
+  if (v > 1) return 1;
+  return v;
+}
 
 function getColorFilter(grade: string): string {
   switch (grade) {
