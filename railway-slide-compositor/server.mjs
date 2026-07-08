@@ -126,6 +126,93 @@ function runFfmpeg(args) {
   });
 }
 
+// ── Concat via filter_complex, optionally with pauses ──
+//
+// Each clip gets tpad (video freeze on last frame) + apad (silence) appended
+// so there's a natural breath between slides. The intro pause is prepended to
+// the FIRST clip only. Pauses of 0 disable that particular padding.
+//
+// Filter graph shape (for N=3 clips, intro=1.5s, between=1.5s):
+//
+//   [0:v]tpad=start_duration=1.5:start_mode=clone:stop_duration=1.5:stop_mode=clone[v0];
+//   [0:a]adelay=1500|1500,apad=pad_dur=1.5[a0];
+//   [1:v]tpad=stop_duration=1.5:stop_mode=clone[v1];
+//   [1:a]apad=pad_dur=1.5[a1];
+//   [2:v]copy[v2]; [2:a]anull[a2];
+//   [v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]
+//
+// The last clip gets no trailing padding — otherwise the video ends on a
+// frozen frame with silence, which looks broken.
+async function runFilterReencodeConcat(localPaths, outPath, { pauseBetweenSlides = 0, introPause = 0 } = {}) {
+  const n = localPaths.length;
+  const inputArgs = [];
+  for (const p of localPaths) inputArgs.push("-i", p);
+
+  const between = Math.max(0, Number(pauseBetweenSlides) || 0);
+  const intro = Math.max(0, Number(introPause) || 0);
+
+  const filterParts = [];
+  const concatInputs = [];
+
+  for (let i = 0; i < n; i++) {
+    const isFirst = i === 0;
+    const isLast = i === n - 1;
+
+    // Video padding: freeze the first/last frame, no black gap.
+    const vPad = [];
+    if (isFirst && intro > 0) {
+      vPad.push(`start_duration=${intro}`, "start_mode=clone");
+    }
+    if (!isLast && between > 0) {
+      vPad.push(`stop_duration=${between}`, "stop_mode=clone");
+    }
+    if (vPad.length > 0) {
+      filterParts.push(`[${i}:v]tpad=${vPad.join(":")}[v${i}]`);
+    } else {
+      filterParts.push(`[${i}:v]copy[v${i}]`);
+    }
+
+    // Audio padding: silence before and/or after the clip's real audio.
+    const aOps = [];
+    if (isFirst && intro > 0) {
+      // adelay wants milliseconds per channel; use "|" to apply to all.
+      const ms = Math.round(intro * 1000);
+      aOps.push(`adelay=${ms}|${ms}`);
+    }
+    if (!isLast && between > 0) {
+      aOps.push(`apad=pad_dur=${between}`);
+    }
+    if (aOps.length > 0) {
+      filterParts.push(`[${i}:a]${aOps.join(",")}[a${i}]`);
+    } else {
+      filterParts.push(`[${i}:a]anull[a${i}]`);
+    }
+
+    concatInputs.push(`[v${i}][a${i}]`);
+  }
+
+  filterParts.push(`${concatInputs.join("")}concat=n=${n}:v=1:a=1[v][a]`);
+  const filter = filterParts.join(";");
+
+  const args = [
+    "-y",
+    ...inputArgs,
+    "-filter_complex", filter,
+    "-map", "[v]",
+    "-map", "[a]",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "23",
+    "-pix_fmt", "yuv420p",
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-movflags", "+faststart",
+    outPath,
+  ];
+
+  await runFfmpeg(args);
+}
+
 // ── POST /composite-slide ──
 app.post("/composite-slide", authMiddleware, async (req, res) => {
   const startTime = Date.now();
@@ -269,7 +356,18 @@ app.post("/stitch-webinar", authMiddleware, async (req, res) => {
   const {
     clip_urls,
     signed_upload_url,
+    // Optional pause knobs. Default to 1.5s between slides and 1.5s before
+    // the first slide — makes the speaker sound natural instead of jumping
+    // straight from one slide's script to the next mid-breath. Freezes the
+    // last video frame + adds silent audio during the pause. Values in
+    // seconds; 0 disables. Callers can override per-request.
+    pause_between_slides_sec: pauseBetweenRaw,
+    intro_pause_sec: introPauseRaw,
   } = req.body || {};
+
+  const pauseBetweenSlides = Math.max(0, Math.min(10, Number(pauseBetweenRaw ?? 1.5)));
+  const introPause = Math.max(0, Math.min(10, Number(introPauseRaw ?? 1.5)));
+  const anyPause = pauseBetweenSlides > 0 || introPause > 0;
 
   if (!Array.isArray(clip_urls) || clip_urls.length === 0) {
     return res.status(400).json({ error: "clip_urls must be a non-empty array" });
@@ -278,7 +376,7 @@ app.post("/stitch-webinar", authMiddleware, async (req, res) => {
     return res.status(400).json({ error: "signed_upload_url is required" });
   }
 
-  console.log(`[${jobId}] Stitching ${clip_urls.length} clips`);
+  console.log(`[${jobId}] Stitching ${clip_urls.length} clips (intro pause=${introPause}s, between=${pauseBetweenSlides}s)`);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "stitch-"));
   const listPath = path.join(tmpDir, "concat.txt");
@@ -302,49 +400,31 @@ app.post("/stitch-webinar", authMiddleware, async (req, res) => {
     fs.writeFileSync(listPath, listContents, "utf8");
 
     // 3) Attempt fast path: concat demuxer + stream copy
-    const fastArgs = [
-      "-y",
-      "-f", "concat",
-      "-safe", "0",
-      "-i", listPath,
-      "-c", "copy",
-      "-movflags", "+faststart",
-      outPath,
-    ];
+    // Skip the fast path entirely when pauses are requested — stream copy
+    // can't insert gaps or freeze frames. Re-encode is the only way.
+    let method = anyPause ? "filter-reencode-pauses" : "stream-copy";
 
-    let method = "stream-copy";
-    try {
-      await runFfmpeg(fastArgs);
-    } catch (fastErr) {
-      console.warn(`[${jobId}] Fast concat failed, falling back to filter_complex re-encode:`, fastErr.message?.slice(0, 200));
-      method = "filter-reencode";
-
-      // Build filter_complex inputs + concat filter
-      const inputArgs = [];
-      for (const p of localPaths) {
-        inputArgs.push("-i", p);
-      }
-      // [0:v][0:a][1:v][1:a]...concat=n=N:v=1:a=1
-      const n = localPaths.length;
-      const filterInputs = localPaths.map((_, i) => `[${i}:v][${i}:a]`).join("");
-      const filter = `${filterInputs}concat=n=${n}:v=1:a=1[v][a]`;
-
-      const reencodeArgs = [
+    if (!anyPause) {
+      const fastArgs = [
         "-y",
-        ...inputArgs,
-        "-filter_complex", filter,
-        "-map", "[v]",
-        "-map", "[a]",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "128k",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", listPath,
+        "-c", "copy",
         "-movflags", "+faststart",
         outPath,
       ];
-      await runFfmpeg(reencodeArgs);
+
+      try {
+        await runFfmpeg(fastArgs);
+      } catch (fastErr) {
+        console.warn(`[${jobId}] Fast concat failed, falling back to filter_complex re-encode:`, fastErr.message?.slice(0, 200));
+        method = "filter-reencode";
+        await runFilterReencodeConcat(localPaths, outPath, { pauseBetweenSlides: 0, introPause: 0 });
+      }
+    } else {
+      // Pauses requested → go straight to filter_complex with tpad/apad
+      await runFilterReencodeConcat(localPaths, outPath, { pauseBetweenSlides, introPause });
     }
 
     const stat = fs.statSync(outPath);
