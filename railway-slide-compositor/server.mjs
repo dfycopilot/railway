@@ -113,6 +113,27 @@ async function downloadTo(url, dest) {
 }
 
 // ── Run ffmpeg, collect stderr, return on exit ──
+// Probe a media file for its duration in seconds via ffprobe.
+// Returns 0 on any failure — caller should treat that as "unknown".
+function probeDurationSec(path) {
+  return new Promise((resolve) => {
+    const args = [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      path,
+    ];
+    const proc = spawn("ffprobe", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    proc.stdout.on("data", (d) => { out += d.toString(); });
+    proc.on("error", () => resolve(0));
+    proc.on("close", () => {
+      const v = parseFloat(out.trim());
+      resolve(Number.isFinite(v) && v > 0 ? v : 0);
+    });
+  });
+}
+
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     const proc = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -174,6 +195,31 @@ async function runFilterReencodeConcat(localPaths, outPath, {
   const intro = Math.max(0, Number(introPause) || 0);
   const holds = Array.isArray(isHoldFlags) ? isHoldFlags : [];
 
+  // ── Slide-transition crossfade ──
+  // Default 0.25s xfade at every clip boundary. Real presentation
+  // software crossfades between slides — hard cuts read as raw
+  // machine output. Set WEBINAR_CROSSFADE_SEC=0 to fall back to
+  // concat (hard cuts). We cap the fade at 40% of any adjacent clip's
+  // duration to avoid negative offsets on very short clips.
+  const requestedFade = Math.max(
+    0,
+    Math.min(2, Number(process.env.WEBINAR_CROSSFADE_SEC ?? 0.25)),
+  );
+  // Probe raw durations up front; needed to compute cumulative xfade
+  // offsets. Zero means "unknown, don't xfade this boundary".
+  const rawDurations = await Promise.all(localPaths.map(probeDurationSec));
+  const paddedDurations = rawDurations.map((raw, i) => {
+    if (raw <= 0) return 0;
+    const isFirst = i === 0;
+    const thisIsHold = !!holds[i];
+    const prevIsHold = i > 0 && !!holds[i - 1];
+    let lead = isFirst ? intro : between;
+    if (thisIsHold || prevIsHold) lead = 0;
+    return raw + lead;
+  });
+  const useXfade = requestedFade > 0 && rawDurations.every((d) => d > 0);
+  console.log(`[stitch] crossfade=${useXfade ? requestedFade + "s" : "off"} durations=[${paddedDurations.map((d) => d.toFixed(1)).join(",")}]`);
+
   const filterParts = [];
   const concatInputs = [];
 
@@ -229,7 +275,60 @@ async function runFilterReencodeConcat(localPaths, outPath, {
     concatInputs.push(`[v${i}][a${i}]`);
   }
 
-  filterParts.push(`${concatInputs.join("")}concat=n=${n}:v=1:a=1[v][a]`);
+  // Merge all clips into [v] and [a_voice].
+  //   xfade mode: chained xfade + acrossfade filters at each boundary
+  //   concat mode: single concat filter (hard cuts)
+  if (useXfade && n > 1) {
+    // Cap fade at 40% of the shortest adjacent clip to avoid degenerate
+    // offsets when one clip is very short.
+    let vLastLabel = "v0";
+    let aLastLabel = "a0";
+    let cumulative = paddedDurations[0];
+    for (let i = 1; i < n; i++) {
+      const boundaryFade = Math.max(
+        0.05,
+        Math.min(requestedFade, 0.4 * Math.min(paddedDurations[i - 1], paddedDurations[i])),
+      );
+      const offset = Math.max(0, cumulative - boundaryFade);
+      const isLast = i === n - 1;
+      const vOut = isLast ? "v" : `vX${i}`;
+      const aOut = isLast ? "a_voice" : `aX${i}`;
+      filterParts.push(
+        `[${vLastLabel}][v${i}]xfade=transition=fade:duration=${boundaryFade.toFixed(3)}:offset=${offset.toFixed(3)}[${vOut}]`,
+      );
+      filterParts.push(
+        `[${aLastLabel}][a${i}]acrossfade=d=${boundaryFade.toFixed(3)}:c1=tri:c2=tri[${aOut}]`,
+      );
+      cumulative = cumulative + paddedDurations[i] - boundaryFade;
+      vLastLabel = vOut;
+      aLastLabel = aOut;
+    }
+  } else {
+    filterParts.push(`${concatInputs.join("")}concat=n=${n}:v=1:a=1[v][a_voice]`);
+  }
+
+  // ── Room-tone / ambient bed ──
+  // AI voice recorded in a vacuum reads as "AI". Real presenters have a
+  // tiny bit of ambient noise around them — HVAC, distant traffic, room
+  // reflections. We synthesize a very quiet pink-noise bed and mix it
+  // under the voice. amplitude 0.008 is roughly -42dB, well below the
+  // conscious threshold but present enough to break the sterile feel.
+  // ambient_amplitude 0 disables. Overridable via env for tuning.
+  const AMBIENT_AMP = Math.max(
+    0,
+    Math.min(0.05, Number(process.env.WEBINAR_AMBIENT_AMPLITUDE ?? 0.008)),
+  );
+  if (AMBIENT_AMP > 0) {
+    filterParts.push(
+      `anoisesrc=color=pink:sample_rate=${TARGET_AR}:amplitude=${AMBIENT_AMP}[ambient]`,
+    );
+    filterParts.push(
+      `[a_voice][ambient]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]`,
+    );
+  } else {
+    filterParts.push(`[a_voice]anull[a]`);
+  }
+
   const filter = filterParts.join(";\n");
 
   // Use -filter_complex_script instead of -filter_complex so a huge filter
@@ -285,12 +384,30 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     // the preroll. When the preroll ends, audio starts and the avatar is
     // already fully visible and in position. Set to 0 to opt out.
     intro_pause_sec = 1.5,
+    // Optional list of "head-turn cutaways" where the avatar briefly
+    // disappears (slide only) mid-clip, mimicking a presenter glancing at
+    // their slides. Each entry: { at_sec, duration_sec }. Frontend picks
+    // ~25% of speaker slides to receive one 0.4-0.6s cutaway.
+    // at_sec is measured from the START of the OUTPUT clip (i.e. including
+    // the intro_pause_sec preroll) — the frontend can just pass the offset
+    // into the presenter's speech and we internally shift by intro_pause_sec.
+    cutaways = [],
   } = req.body || {};
 
   const introSec = Math.max(0, Math.min(5, Number(intro_pause_sec) || 0));
   const introMs = Math.round(introSec * 1000);
   const fadeStartSec = introSec * 0.5;
   const fadeDurSec = introSec * 0.5;
+  const cleanCutaways = Array.isArray(cutaways)
+    ? cutaways
+        .map((c) => ({
+          // Frontend's `at_sec` is speech-relative; shift into output timeline.
+          at: Math.max(0, Number(c?.at_sec) || 0) + introSec,
+          dur: Math.max(0.1, Math.min(2, Number(c?.duration_sec) || 0.5)),
+        }))
+        .filter((c) => Number.isFinite(c.at) && Number.isFinite(c.dur))
+        .sort((a, b) => a.at - b.at)
+    : [];
 
   if (!talking_head_url || !slide_image_url) {
     return res.status(400).json({ error: "talking_head_url and slide_image_url are required" });
@@ -356,10 +473,20 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
       ? `[1:a]adelay=${introMs}|${introMs}[a]`
       : "";
 
+    // Head-turn cutaways: use overlay's `enable` expression to gate the
+    // avatar off during specific time windows. Multiple windows combine
+    // with logical AND-NOT — the overlay is enabled when NOT inside any
+    // cutaway range. When no cutaways, we omit the expression entirely.
+    const enableExpr = cleanCutaways.length > 0
+      ? "enable='" + cleanCutaways
+          .map((c) => `not(between(t\\,${c.at.toFixed(2)}\\,${(c.at + c.dur).toFixed(2)}))`)
+          .join("*") + "'"
+      : "";
+
     const filterComplex = [
       `[1:v]${videoIntroChain}crop='min(iw\\,ih)':'min(iw\\,ih)',scale=${avatarPx}:${avatarPx},format=yuva420p,geq='r=r(X,Y):g=g(X,Y):b=b(X,Y):a=if(gt(pow(X-${halfSize},2)+pow(Y-${halfSize},2),pow(${halfSize},2)),0,255)'${videoOutroFade}[circle]`,
       `[0:v]scale=${slide_width}:${slide_height}:force_original_aspect_ratio=decrease,pad=${slide_width}:${slide_height}:(ow-iw)/2:(oh-ih)/2:color=black[bg]`,
-      `[bg][circle]overlay=${x}:${y}:shortest=1[v]`,
+      `[bg][circle]overlay=${x}:${y}${enableExpr ? ":" + enableExpr : ""}:shortest=1[v]`,
       ...(audioIntroChain ? [audioIntroChain] : []),
     ].join(";");
 
