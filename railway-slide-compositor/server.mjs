@@ -121,7 +121,23 @@ function runFfmpeg(args) {
     proc.on("error", reject);
     proc.on("close", (code) => {
       if (code === 0) resolve({ stderr });
-      else reject(new Error(`ffmpeg exit ${code}: ${stderr.slice(-2000)}`));
+      else {
+        // Grab a larger tail so the ACTUAL error surface bubbles up. The
+        // last 2000 chars was often just ffmpeg's stream-routing summary
+        // on big webinar concats, hiding the real failure line.
+        const tail = stderr.slice(-8000);
+        // Try to find the specific error keyword and prefer that region.
+        const errIdx = Math.max(
+          stderr.lastIndexOf("Error"),
+          stderr.lastIndexOf("Invalid"),
+          stderr.lastIndexOf("Could not"),
+          stderr.lastIndexOf("failed"),
+        );
+        const focused = errIdx > 0
+          ? stderr.slice(Math.max(0, errIdx - 200), Math.min(stderr.length, errIdx + 1200))
+          : "";
+        reject(new Error(`ffmpeg exit ${code}. Focused error: ${focused || "(none found)"}. Tail: ${tail}`));
+      }
     });
   });
 }
@@ -161,14 +177,24 @@ async function runFilterReencodeConcat(localPaths, outPath, {
   const filterParts = [];
   const concatInputs = [];
 
+  // Force uniform frame size + rate + pixel format + sample rate on every
+  // input BEFORE the concat filter. Without this, slight mismatches between
+  // D-ID clips (e.g. 25.001 fps quirks, 29.97 vs 30, 44.1 vs 48kHz audio,
+  // yuv420p vs yuv420p10le) can make ffmpeg's concat filter fail with
+  // "Invalid argument" or a cryptic exit 1. The normalization is cheap
+  // compared to the re-encode we're already doing.
+  const TARGET_W = 1920;
+  const TARGET_H = 1080;
+  const TARGET_FPS = 30;
+  const TARGET_AR = 44100;
+
   for (let i = 0; i < n; i++) {
     const isFirst = i === 0;
     const thisIsHold = !!holds[i];
     const prevIsHold = i > 0 && !!holds[i - 1];
 
     // Leading pause on this clip:
-    //   - Clip 0: introPause (unless clip 0 itself is a hold slide — then
-    //     nothing before it needs a pause).
+    //   - Clip 0: introPause (unless clip 0 itself is a hold slide).
     //   - Any subsequent clip: pauseBetweenSlides, UNLESS this clip is a
     //     hold slide (its own dwell IS the beat) OR the previous clip was
     //     a hold slide (the opener already provided the beat before this
@@ -176,39 +202,57 @@ async function runFilterReencodeConcat(localPaths, outPath, {
     let leadPause = isFirst ? intro : between;
     if (thisIsHold || prevIsHold) leadPause = 0;
 
-    // Video padding
+    // Video chain: scale → fps → pixel format → optional tpad
+    const vChain = [
+      `scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease`,
+      `pad=${TARGET_W}:${TARGET_H}:(ow-iw)/2:(oh-ih)/2:color=black`,
+      `setsar=1`,
+      `fps=${TARGET_FPS}`,
+      `format=yuv420p`,
+    ];
     if (leadPause > 0) {
-      filterParts.push(`[${i}:v]tpad=start_duration=${leadPause}:start_mode=clone[v${i}]`);
-    } else {
-      filterParts.push(`[${i}:v]copy[v${i}]`);
+      vChain.push(`tpad=start_duration=${leadPause}:start_mode=clone`);
     }
+    filterParts.push(`[${i}:v]${vChain.join(",")}[v${i}]`);
 
-    // Audio padding
+    // Audio chain: resample → stereo → optional adelay
+    const aChain = [
+      `aresample=${TARGET_AR}`,
+      `aformat=sample_fmts=fltp:channel_layouts=stereo`,
+    ];
     if (leadPause > 0) {
-      // adelay wants milliseconds per channel; "|" applies to all.
       const ms = Math.round(leadPause * 1000);
-      filterParts.push(`[${i}:a]adelay=${ms}|${ms}[a${i}]`);
-    } else {
-      filterParts.push(`[${i}:a]anull[a${i}]`);
+      aChain.push(`adelay=${ms}|${ms}`);
     }
+    filterParts.push(`[${i}:a]${aChain.join(",")}[a${i}]`);
 
     concatInputs.push(`[v${i}][a${i}]`);
   }
 
   filterParts.push(`${concatInputs.join("")}concat=n=${n}:v=1:a=1[v][a]`);
-  const filter = filterParts.join(";");
+  const filter = filterParts.join(";\n");
+
+  // Use -filter_complex_script instead of -filter_complex so a huge filter
+  // graph (hundreds of clips × multiple filter chains) doesn't blow past
+  // the OS command-line length limit. ffmpeg reads the graph from a file.
+  const filterScriptPath = path.join(path.dirname(outPath), "filter_graph.txt");
+  fs.writeFileSync(filterScriptPath, filter, "utf8");
+  console.log(`[stitch] Filter graph: ${filterParts.length} nodes, ${filter.length} chars → ${filterScriptPath}`);
 
   const args = [
     "-y",
     ...inputArgs,
-    "-filter_complex", filter,
+    "-filter_complex_script", filterScriptPath,
     "-map", "[v]",
     "-map", "[a]",
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "23",
     "-pix_fmt", "yuv420p",
+    "-r", String(TARGET_FPS),
     "-c:a", "aac",
+    "-ar", String(TARGET_AR),
+    "-ac", "2",
     "-b:a", "128k",
     "-movflags", "+faststart",
     outPath,
