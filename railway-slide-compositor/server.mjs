@@ -476,10 +476,17 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     // Head-turn cutaways: use overlay's `enable` expression to gate the
     // avatar off during specific time windows. Multiple windows combine
     // with logical AND-NOT — the overlay is enabled when NOT inside any
-    // cutaway range. When no cutaways, we omit the expression entirely.
+    // cutaway range.
+    //
+    // IMPORTANT: NO backslash-escaping for the commas inside `between()`.
+    // ffmpeg treats backslashes inside single-quoted argument values as
+    // LITERAL characters — so writing `t\,5.0\,5.5` produces a parse
+    // error ("t\" is not a valid variable). The single quotes around the
+    // whole enable expression already protect the commas from being
+    // interpreted as filter option separators.
     const enableExpr = cleanCutaways.length > 0
       ? "enable='" + cleanCutaways
-          .map((c) => `not(between(t\\,${c.at.toFixed(2)}\\,${(c.at + c.dur).toFixed(2)}))`)
+          .map((c) => `not(between(t,${c.at.toFixed(2)},${(c.at + c.dur).toFixed(2)}))`)
           .join("*") + "'"
       : "";
 
