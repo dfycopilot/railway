@@ -276,7 +276,21 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     // Signed upload URL (from Supabase storage.createSignedUploadUrl).
     // Railway PUTs the composited file to this URL — no Supabase creds needed here.
     signed_upload_url,
+    // NEW: slide-only preroll before the avatar appears. Defaults to 1.5s.
+    // Solves the "frozen mid-word avatar face" problem — the stitcher's
+    // between-slides pause was cloning the composited clip's first frame,
+    // which included the avatar caught in a random pose. With a preroll
+    // baked in, the frozen first frame is now the slide alone (no avatar),
+    // and the avatar itself fades in gracefully over the second half of
+    // the preroll. When the preroll ends, audio starts and the avatar is
+    // already fully visible and in position. Set to 0 to opt out.
+    intro_pause_sec = 1.5,
   } = req.body || {};
+
+  const introSec = Math.max(0, Math.min(5, Number(intro_pause_sec) || 0));
+  const introMs = Math.round(introSec * 1000);
+  const fadeStartSec = introSec * 0.5;
+  const fadeDurSec = introSec * 0.5;
 
   if (!talking_head_url || !slide_image_url) {
     return res.status(400).json({ error: "talking_head_url and slide_image_url are required" });
@@ -285,7 +299,7 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     return res.status(400).json({ error: "signed_upload_url is required — edge function must generate one from Supabase storage" });
   }
 
-  console.log(`[${jobId}] Compositing: pos=${position} size=${size} slide=${slide_width}x${slide_height}`);
+  console.log(`[${jobId}] Compositing: pos=${position} size=${size} slide=${slide_width}x${slide_height} intro=${introSec}s`);
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "composite-"));
   const headPath = path.join(tmpDir, "head.mp4");
@@ -312,10 +326,18 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     // 3) Build filter graph
     //
     //   [1:v] — talking head video
+    //     (optional) tpad start: prepend N seconds of clone-first-frame so
+    //     the circle stream extends leftward before the alpha fade kicks in
     //     crop to square (center crop)
     //     scale to avatarPx × avatarPx
     //     format=yuva420p (add alpha channel)
     //     geq filter: set alpha=0 for pixels outside the inscribed circle
+    //     (optional) fade in alpha during the second half of the intro
+    //     so the avatar appears gracefully, not with a hard cut
+    //
+    //   [1:a] — talking head audio
+    //     (optional) adelay by intro_pause_sec so the presenter's voice
+    //     starts exactly when the avatar reaches full opacity
     //
     //   [0:v] — slide image (looped)
     //     scale to slide dimensions
@@ -324,11 +346,26 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
     //
     // The `-loop 1 -framerate 30` on the slide input gives us a video stream
     // we can overlay onto, and `-shortest` stops when the head audio ends.
+    const videoIntroChain = introSec > 0
+      ? `tpad=start_duration=${introSec}:start_mode=clone,`
+      : "";
+    const videoOutroFade = introSec > 0
+      ? `,fade=in:st=${fadeStartSec}:d=${fadeDurSec}:alpha=1`
+      : "";
+    const audioIntroChain = introSec > 0
+      ? `[1:a]adelay=${introMs}|${introMs}[a]`
+      : "";
+
     const filterComplex = [
-      `[1:v]crop='min(iw\\,ih)':'min(iw\\,ih)',scale=${avatarPx}:${avatarPx},format=yuva420p,geq='r=r(X,Y):g=g(X,Y):b=b(X,Y):a=if(gt(pow(X-${halfSize},2)+pow(Y-${halfSize},2),pow(${halfSize},2)),0,255)'[circle]`,
+      `[1:v]${videoIntroChain}crop='min(iw\\,ih)':'min(iw\\,ih)',scale=${avatarPx}:${avatarPx},format=yuva420p,geq='r=r(X,Y):g=g(X,Y):b=b(X,Y):a=if(gt(pow(X-${halfSize},2)+pow(Y-${halfSize},2),pow(${halfSize},2)),0,255)'${videoOutroFade}[circle]`,
       `[0:v]scale=${slide_width}:${slide_height}:force_original_aspect_ratio=decrease,pad=${slide_width}:${slide_height}:(ow-iw)/2:(oh-ih)/2:color=black[bg]`,
       `[bg][circle]overlay=${x}:${y}:shortest=1[v]`,
+      ...(audioIntroChain ? [audioIntroChain] : []),
     ].join(";");
+
+    // Audio output stream: [a] if we prepended silence, otherwise the raw
+    // head audio track (1:a).
+    const audioMapOut = introSec > 0 ? "[a]" : "1:a?";
 
     const args = [
       "-y",
@@ -336,7 +373,7 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
       "-i", headPath,
       "-filter_complex", filterComplex,
       "-map", "[v]",
-      "-map", "1:a?",
+      "-map", audioMapOut,
       "-c:v", "libx264",
       "-preset", "veryfast",
       "-crf", "23",
