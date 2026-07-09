@@ -145,24 +145,36 @@ function runFfmpeg(args) {
 //   [1:v]tpad=start_duration=1.5:start_mode=clone[v1]; [1:a]adelay=1500|1500[a1];
 //   [2:v]tpad=start_duration=1.5:start_mode=clone[v2]; [2:a]adelay=1500|1500[a2];
 //   [v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]
-async function runFilterReencodeConcat(localPaths, outPath, { pauseBetweenSlides = 0, introPause = 0 } = {}) {
+async function runFilterReencodeConcat(localPaths, outPath, {
+  pauseBetweenSlides = 0,
+  introPause = 0,
+  isHoldFlags = [],
+} = {}) {
   const n = localPaths.length;
   const inputArgs = [];
   for (const p of localPaths) inputArgs.push("-i", p);
 
   const between = Math.max(0, Number(pauseBetweenSlides) || 0);
   const intro = Math.max(0, Number(introPause) || 0);
+  const holds = Array.isArray(isHoldFlags) ? isHoldFlags : [];
 
   const filterParts = [];
   const concatInputs = [];
 
   for (let i = 0; i < n; i++) {
     const isFirst = i === 0;
+    const thisIsHold = !!holds[i];
+    const prevIsHold = i > 0 && !!holds[i - 1];
 
-    // Leading pause on this clip: intro pause on clip 0 (if requested), OR
-    // between-slides pause on any subsequent clip. Both freeze the FIRST
-    // frame + silence at the head.
-    const leadPause = isFirst ? intro : between;
+    // Leading pause on this clip:
+    //   - Clip 0: introPause (unless clip 0 itself is a hold slide — then
+    //     nothing before it needs a pause).
+    //   - Any subsequent clip: pauseBetweenSlides, UNLESS this clip is a
+    //     hold slide (its own dwell IS the beat) OR the previous clip was
+    //     a hold slide (the opener already provided the beat before this
+    //     first-real-slide starts).
+    let leadPause = isFirst ? intro : between;
+    if (thisIsHold || prevIsHold) leadPause = 0;
 
     // Video padding
     if (leadPause > 0) {
@@ -330,6 +342,103 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
   }
 });
 
+// ── POST /render-hold-slide ──
+//
+// Turn a single slide image + a duration into a silent-audio MP4 clip that
+// stitch-webinar can concatenate alongside the D-ID clips. Used for the
+// "Webinar Will Be Starting Soon" opener and the "Thank you for joining"
+// closer — no avatar, no script, just a still frame that holds for N
+// seconds. The MP4's codec params are chosen to match D-ID's output so the
+// stream-copy fast-path in stitch-webinar still works when possible.
+app.post("/render-hold-slide", authMiddleware, async (req, res) => {
+  const startTime = Date.now();
+  const jobId = crypto.randomUUID().slice(0, 8);
+
+  const {
+    slide_image_url,
+    duration_sec,
+    signed_upload_url,
+    // Match D-ID/composite-slide output so stitch-webinar's -c copy path
+    // works cross-clip. Override if a project uses different dims.
+    width = 1920,
+    height = 1080,
+    fps = 25,
+  } = req.body || {};
+
+  const durationSec = Number(duration_sec);
+  if (!slide_image_url) return res.status(400).json({ error: "slide_image_url is required" });
+  if (!Number.isFinite(durationSec) || durationSec <= 0 || durationSec > 120) {
+    return res.status(400).json({ error: "duration_sec must be 0 < d <= 120" });
+  }
+  if (!signed_upload_url) return res.status(400).json({ error: "signed_upload_url is required" });
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "hold-"));
+  const imgPath = path.join(tmpDir, "slide.png");
+  const outPath = path.join(tmpDir, "hold.mp4");
+
+  try {
+    // 1) Download slide image
+    await downloadTo(slide_image_url, imgPath);
+
+    // 2) Render silent MP4:
+    //   - Video: loop the still image for durationSec at fps
+    //   - Audio: anullsrc (silent stereo 44.1kHz)
+    //   - Force pixel format + AAC to match D-ID clips → -c copy in the
+    //     stitch step doesn't have to re-encode
+    const args = [
+      "-y",
+      "-loop", "1",
+      "-i", imgPath,
+      "-f", "lavfi",
+      "-i", "anullsrc=r=44100:cl=stereo",
+      "-t", String(durationSec),
+      "-r", String(fps),
+      "-vf", `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1`,
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-tune", "stillimage",
+      "-crf", "23",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-ar", "44100",
+      "-ac", "2",
+      "-b:a", "128k",
+      "-shortest",
+      "-movflags", "+faststart",
+      outPath,
+    ];
+
+    console.log(`[${jobId}] Rendering hold slide (${durationSec}s @ ${width}x${height} ${fps}fps)`);
+    await runFfmpeg(args);
+    const stat = fs.statSync(outPath);
+    console.log(`[${jobId}] Hold slide rendered in ${Date.now() - startTime}ms — ${(stat.size / 1024).toFixed(0)}KB`);
+
+    // 3) Upload via signed URL
+    const fileBuffer = fs.readFileSync(outPath);
+    const uploadResp = await fetch(signed_upload_url, {
+      method: "PUT",
+      headers: { "Content-Type": "video/mp4" },
+      body: fileBuffer,
+    });
+    if (!uploadResp.ok) {
+      const errText = await uploadResp.text().catch(() => "");
+      throw new Error(`Signed-URL upload failed ${uploadResp.status}: ${errText.slice(0, 300)}`);
+    }
+
+    res.json({
+      success: true,
+      duration_ms: Date.now() - startTime,
+      size_bytes: stat.size,
+      duration_sec: durationSec,
+    });
+  } catch (err) {
+    console.error(`[${jobId}] Hold slide render failed:`, err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 // ── POST /stitch-webinar ──
 //
 // Concatenates N composited slide clips into one final webinar MP4.
@@ -348,18 +457,23 @@ app.post("/stitch-webinar", authMiddleware, async (req, res) => {
   const {
     clip_urls,
     signed_upload_url,
-    // Optional pause knobs. Default to 1.5s between slides and 1.5s before
-    // the first slide — makes the speaker sound natural instead of jumping
-    // straight from one slide's script to the next mid-breath. Freezes the
-    // last video frame + adds silent audio during the pause. Values in
-    // seconds; 0 disables. Callers can override per-request.
+    // Optional pause knobs. Default 1.5s between slides + 1.5s before the
+    // first slide. Values in seconds; 0 disables. Callers can override.
     pause_between_slides_sec: pauseBetweenRaw,
     intro_pause_sec: introPauseRaw,
+    // Optional per-clip flag: `true` = this clip is a "hold" slide (silent
+    // opener/closer with no avatar). Suppresses the leading between-slides
+    // pause on any clip whose predecessor is a hold — the hold slide's own
+    // dwell already provides the beat, so tacking on another 1.5s would
+    // stall the pacing. Also suppresses the leading pause on hold slides
+    // themselves (their whole point is to hold their own duration).
+    is_hold_flags: isHoldFlagsRaw,
   } = req.body || {};
 
   const pauseBetweenSlides = Math.max(0, Math.min(10, Number(pauseBetweenRaw ?? 1.5)));
   const introPause = Math.max(0, Math.min(10, Number(introPauseRaw ?? 1.5)));
   const anyPause = pauseBetweenSlides > 0 || introPause > 0;
+  const isHoldFlags = Array.isArray(isHoldFlagsRaw) ? isHoldFlagsRaw.map((v) => !!v) : [];
 
   if (!Array.isArray(clip_urls) || clip_urls.length === 0) {
     return res.status(400).json({ error: "clip_urls must be a non-empty array" });
@@ -412,11 +526,19 @@ app.post("/stitch-webinar", authMiddleware, async (req, res) => {
       } catch (fastErr) {
         console.warn(`[${jobId}] Fast concat failed, falling back to filter_complex re-encode:`, fastErr.message?.slice(0, 200));
         method = "filter-reencode";
-        await runFilterReencodeConcat(localPaths, outPath, { pauseBetweenSlides: 0, introPause: 0 });
+        await runFilterReencodeConcat(localPaths, outPath, {
+          pauseBetweenSlides: 0,
+          introPause: 0,
+          isHoldFlags,
+        });
       }
     } else {
       // Pauses requested → go straight to filter_complex with tpad/apad
-      await runFilterReencodeConcat(localPaths, outPath, { pauseBetweenSlides, introPause });
+      await runFilterReencodeConcat(localPaths, outPath, {
+        pauseBetweenSlides,
+        introPause,
+        isHoldFlags,
+      });
     }
 
     const stat = fs.statSync(outPath);
