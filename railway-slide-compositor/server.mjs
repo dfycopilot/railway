@@ -128,21 +128,23 @@ function runFfmpeg(args) {
 
 // ── Concat via filter_complex, optionally with pauses ──
 //
-// Each clip gets tpad (video freeze on last frame) + apad (silence) appended
-// so there's a natural breath between slides. The intro pause is prepended to
-// the FIRST clip only. Pauses of 0 disable that particular padding.
+// Each clip gets tpad (video freeze on FIRST frame) + adelay (silence at start)
+// prepended so there's a natural breath BEFORE each slide starts talking. Eric
+// verified the D-ID avatar's first-frame pose is more neutral than the caught-
+// mid-word last-frame pose, so pausing at the start of the next slide looks
+// better than pausing at the end of the previous one.
 //
-// Filter graph shape (for N=3 clips, intro=1.5s, between=1.5s):
+// The first clip skips the between-slides pause (nothing before it to breathe
+// after) but can still receive an explicit introPause. The last clip works
+// exactly like any middle clip — the pause fires before its content and there's
+// no trailing pause after it.
 //
-//   [0:v]tpad=start_duration=1.5:start_mode=clone:stop_duration=1.5:stop_mode=clone[v0];
-//   [0:a]adelay=1500|1500,apad=pad_dur=1.5[a0];
-//   [1:v]tpad=stop_duration=1.5:stop_mode=clone[v1];
-//   [1:a]apad=pad_dur=1.5[a1];
-//   [2:v]copy[v2]; [2:a]anull[a2];
+// Filter graph shape (N=3 clips, intro=0, between=1.5s):
+//
+//   [0:v]copy[v0]; [0:a]anull[a0];                                          // first clip: no leading pause
+//   [1:v]tpad=start_duration=1.5:start_mode=clone[v1]; [1:a]adelay=1500|1500[a1];
+//   [2:v]tpad=start_duration=1.5:start_mode=clone[v2]; [2:a]adelay=1500|1500[a2];
 //   [v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]
-//
-// The last clip gets no trailing padding — otherwise the video ends on a
-// frozen frame with silence, which looks broken.
 async function runFilterReencodeConcat(localPaths, outPath, { pauseBetweenSlides = 0, introPause = 0 } = {}) {
   const n = localPaths.length;
   const inputArgs = [];
@@ -156,34 +158,24 @@ async function runFilterReencodeConcat(localPaths, outPath, { pauseBetweenSlides
 
   for (let i = 0; i < n; i++) {
     const isFirst = i === 0;
-    const isLast = i === n - 1;
 
-    // Video padding: freeze the first/last frame, no black gap.
-    const vPad = [];
-    if (isFirst && intro > 0) {
-      vPad.push(`start_duration=${intro}`, "start_mode=clone");
-    }
-    if (!isLast && between > 0) {
-      vPad.push(`stop_duration=${between}`, "stop_mode=clone");
-    }
-    if (vPad.length > 0) {
-      filterParts.push(`[${i}:v]tpad=${vPad.join(":")}[v${i}]`);
+    // Leading pause on this clip: intro pause on clip 0 (if requested), OR
+    // between-slides pause on any subsequent clip. Both freeze the FIRST
+    // frame + silence at the head.
+    const leadPause = isFirst ? intro : between;
+
+    // Video padding
+    if (leadPause > 0) {
+      filterParts.push(`[${i}:v]tpad=start_duration=${leadPause}:start_mode=clone[v${i}]`);
     } else {
       filterParts.push(`[${i}:v]copy[v${i}]`);
     }
 
-    // Audio padding: silence before and/or after the clip's real audio.
-    const aOps = [];
-    if (isFirst && intro > 0) {
-      // adelay wants milliseconds per channel; use "|" to apply to all.
-      const ms = Math.round(intro * 1000);
-      aOps.push(`adelay=${ms}|${ms}`);
-    }
-    if (!isLast && between > 0) {
-      aOps.push(`apad=pad_dur=${between}`);
-    }
-    if (aOps.length > 0) {
-      filterParts.push(`[${i}:a]${aOps.join(",")}[a${i}]`);
+    // Audio padding
+    if (leadPause > 0) {
+      // adelay wants milliseconds per channel; "|" applies to all.
+      const ms = Math.round(leadPause * 1000);
+      filterParts.push(`[${i}:a]adelay=${ms}|${ms}[a${i}]`);
     } else {
       filterParts.push(`[${i}:a]anull[a${i}]`);
     }
