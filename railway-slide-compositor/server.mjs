@@ -195,30 +195,12 @@ async function runFilterReencodeConcat(localPaths, outPath, {
   const intro = Math.max(0, Number(introPause) || 0);
   const holds = Array.isArray(isHoldFlags) ? isHoldFlags : [];
 
-  // ── Slide-transition crossfade ──
-  // Default 0.25s xfade at every clip boundary. Real presentation
-  // software crossfades between slides — hard cuts read as raw
-  // machine output. Set WEBINAR_CROSSFADE_SEC=0 to fall back to
-  // concat (hard cuts). We cap the fade at 40% of any adjacent clip's
-  // duration to avoid negative offsets on very short clips.
-  const requestedFade = Math.max(
-    0,
-    Math.min(2, Number(process.env.WEBINAR_CROSSFADE_SEC ?? 0.25)),
-  );
-  // Probe raw durations up front; needed to compute cumulative xfade
-  // offsets. Zero means "unknown, don't xfade this boundary".
-  const rawDurations = await Promise.all(localPaths.map(probeDurationSec));
-  const paddedDurations = rawDurations.map((raw, i) => {
-    if (raw <= 0) return 0;
-    const isFirst = i === 0;
-    const thisIsHold = !!holds[i];
-    const prevIsHold = i > 0 && !!holds[i - 1];
-    let lead = isFirst ? intro : between;
-    if (thisIsHold || prevIsHold) lead = 0;
-    return raw + lead;
-  });
-  const useXfade = requestedFade > 0 && rawDurations.every((d) => d > 0);
-  console.log(`[stitch] crossfade=${useXfade ? requestedFade + "s" : "off"} durations=[${paddedDurations.map((d) => d.toFixed(1)).join(",")}]`);
+  // Crossfades disabled. Eric reported audio/video sync drift across
+  // long webinars — the xfade offset math + acrossfade audio math
+  // don't line up perfectly across many boundaries, and small errors
+  // compound over 40+ clips. Hard cuts via concat filter are what the
+  // pipeline used before the naturalness batch and worked reliably.
+  const useXfade = false;
 
   const filterParts = [];
   const concatInputs = [];
@@ -275,59 +257,10 @@ async function runFilterReencodeConcat(localPaths, outPath, {
     concatInputs.push(`[v${i}][a${i}]`);
   }
 
-  // Merge all clips into [v] and [a_voice].
-  //   xfade mode: chained xfade + acrossfade filters at each boundary
-  //   concat mode: single concat filter (hard cuts)
-  if (useXfade && n > 1) {
-    // Cap fade at 40% of the shortest adjacent clip to avoid degenerate
-    // offsets when one clip is very short.
-    let vLastLabel = "v0";
-    let aLastLabel = "a0";
-    let cumulative = paddedDurations[0];
-    for (let i = 1; i < n; i++) {
-      const boundaryFade = Math.max(
-        0.05,
-        Math.min(requestedFade, 0.4 * Math.min(paddedDurations[i - 1], paddedDurations[i])),
-      );
-      const offset = Math.max(0, cumulative - boundaryFade);
-      const isLast = i === n - 1;
-      const vOut = isLast ? "v" : `vX${i}`;
-      const aOut = isLast ? "a_voice" : `aX${i}`;
-      filterParts.push(
-        `[${vLastLabel}][v${i}]xfade=transition=fade:duration=${boundaryFade.toFixed(3)}:offset=${offset.toFixed(3)}[${vOut}]`,
-      );
-      filterParts.push(
-        `[${aLastLabel}][a${i}]acrossfade=d=${boundaryFade.toFixed(3)}:c1=tri:c2=tri[${aOut}]`,
-      );
-      cumulative = cumulative + paddedDurations[i] - boundaryFade;
-      vLastLabel = vOut;
-      aLastLabel = aOut;
-    }
-  } else {
-    filterParts.push(`${concatInputs.join("")}concat=n=${n}:v=1:a=1[v][a_voice]`);
-  }
-
-  // ── Room-tone / ambient bed ──
-  // AI voice recorded in a vacuum reads as "AI". Real presenters have a
-  // tiny bit of ambient noise around them — HVAC, distant traffic, room
-  // reflections. We synthesize a very quiet pink-noise bed and mix it
-  // under the voice. amplitude 0.008 is roughly -42dB, well below the
-  // conscious threshold but present enough to break the sterile feel.
-  // ambient_amplitude 0 disables. Overridable via env for tuning.
-  const AMBIENT_AMP = Math.max(
-    0,
-    Math.min(0.05, Number(process.env.WEBINAR_AMBIENT_AMPLITUDE ?? 0.008)),
-  );
-  if (AMBIENT_AMP > 0) {
-    filterParts.push(
-      `anoisesrc=color=pink:sample_rate=${TARGET_AR}:amplitude=${AMBIENT_AMP}[ambient]`,
-    );
-    filterParts.push(
-      `[a_voice][ambient]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]`,
-    );
-  } else {
-    filterParts.push(`[a_voice]anull[a]`);
-  }
+  // Merge all clips into [v] and [a] via the concat filter (hard cuts).
+  // Crossfades + ambient bed were rolled back after they caused audio
+  // sync drift and voice quality regressions in Eric's 48-slide test.
+  filterParts.push(`${concatInputs.join("")}concat=n=${n}:v=1:a=1[v][a]`);
 
   const filter = filterParts.join(";\n");
 
