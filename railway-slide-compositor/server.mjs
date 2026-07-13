@@ -134,6 +134,31 @@ function probeDurationSec(path) {
   });
 }
 
+// Probe the sample rate (Hz) of the first audio stream. Returns 0 on any
+// failure — caller treats that as "unknown, assume mismatch". Used by
+// stitch-webinar to decide whether the fast `-c copy` concat path is safe:
+// concat demuxer + stream copy silently produces pitched/slowed audio when
+// per-clip sample rates differ. Every clip must share the same rate.
+function probeAudioSampleRate(path) {
+  return new Promise((resolve) => {
+    const args = [
+      "-v", "error",
+      "-select_streams", "a:0",
+      "-show_entries", "stream=sample_rate",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      path,
+    ];
+    const proc = spawn("ffprobe", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    proc.stdout.on("data", (d) => { out += d.toString(); });
+    proc.on("error", () => resolve(0));
+    proc.on("close", () => {
+      const v = parseInt(out.trim(), 10);
+      resolve(Number.isFinite(v) && v > 0 ? v : 0);
+    });
+  });
+}
+
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     const proc = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -214,7 +239,12 @@ async function runFilterReencodeConcat(localPaths, outPath, {
   const TARGET_W = 1920;
   const TARGET_H = 1080;
   const TARGET_FPS = 30;
-  const TARGET_AR = 44100;
+  // 48kHz matches native D-ID face-clip audio, so speaker audio passes
+  // through the aresample filter with zero rate conversion. Hold slides
+  // (opener/closer) and any legacy 44.1kHz clips get upsampled to 48kHz
+  // here — that's a proper resample, not a mis-labeled reinterpretation,
+  // so no pitch/speed artifacts.
+  const TARGET_AR = 48000;
 
   for (let i = 0; i < n; i++) {
     const isFirst = i === 0;
@@ -446,6 +476,15 @@ app.post("/composite-slide", authMiddleware, async (req, res) => {
       "-crf", "23",
       "-pix_fmt", "yuv420p",
       "-c:a", "aac",
+      // Force a fixed 48kHz stereo output so every composited clip has
+      // identical audio codec params. D-ID face clips arrive at 48kHz
+      // natively — matching that avoids resampling the voice at all
+      // (best fidelity) while still giving the stitcher a consistent
+      // codec profile for the fast `-c copy` concat path. Without this,
+      // mismatched rates across clips would break stitch-webinar and
+      // produce pitched/slowed audio in the final MP4.
+      "-ar", "48000",
+      "-ac", "2",
       "-b:a", "128k",
       "-shortest",
       "-movflags", "+faststart",
@@ -530,7 +569,9 @@ app.post("/render-hold-slide", authMiddleware, async (req, res) => {
 
     // 2) Render silent MP4:
     //   - Video: loop the still image for durationSec at fps
-    //   - Audio: anullsrc (silent stereo 44.1kHz)
+    //   - Audio: anullsrc (silent stereo 48kHz — matches D-ID face-clip
+    //     rate exactly so the stitcher's -c copy fast path can concat
+    //     opener + speaker slides + closer without an audio mismatch)
     //   - Force pixel format + AAC to match D-ID clips → -c copy in the
     //     stitch step doesn't have to re-encode
     const args = [
@@ -538,7 +579,7 @@ app.post("/render-hold-slide", authMiddleware, async (req, res) => {
       "-loop", "1",
       "-i", imgPath,
       "-f", "lavfi",
-      "-i", "anullsrc=r=44100:cl=stereo",
+      "-i", "anullsrc=r=48000:cl=stereo",
       "-t", String(durationSec),
       "-r", String(fps),
       "-vf", `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1`,
@@ -548,7 +589,7 @@ app.post("/render-hold-slide", authMiddleware, async (req, res) => {
       "-crf", "23",
       "-pix_fmt", "yuv420p",
       "-c:a", "aac",
-      "-ar", "44100",
+      "-ar", "48000",
       "-ac", "2",
       "-b:a", "128k",
       "-shortest",
@@ -659,21 +700,46 @@ app.post("/stitch-webinar", authMiddleware, async (req, res) => {
     let method = anyPause ? "filter-reencode-pauses" : "stream-copy";
 
     if (!anyPause) {
-      const fastArgs = [
-        "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", listPath,
-        "-c", "copy",
-        "-movflags", "+faststart",
-        outPath,
-      ];
+      // The concat demuxer + `-c copy` path silently produces pitched /
+      // slowed audio when per-clip sample rates differ: the container
+      // metadata takes rate from the first clip, but subsequent clips'
+      // sample counts get played back at that wrong rate.
+      //
+      // Probe every clip's audio sample rate up front. If all clips agree,
+      // the fast path is safe. If any clip disagrees (or probe fails), skip
+      // straight to filter_complex where `aresample=44100` normalizes each
+      // input to a common rate before concatenation.
+      const rates = await Promise.all(localPaths.map((p) => probeAudioSampleRate(p)));
+      const uniqueRates = Array.from(new Set(rates));
+      const audioConsistent = uniqueRates.length === 1 && uniqueRates[0] > 0;
+      if (!audioConsistent) {
+        console.log(`[${jobId}] Audio sample rates mismatch across clips: [${uniqueRates.join(", ")}] — skipping fast path.`);
+      }
 
-      try {
-        await runFfmpeg(fastArgs);
-      } catch (fastErr) {
-        console.warn(`[${jobId}] Fast concat failed, falling back to filter_complex re-encode:`, fastErr.message?.slice(0, 200));
-        method = "filter-reencode";
+      if (audioConsistent) {
+        const fastArgs = [
+          "-y",
+          "-f", "concat",
+          "-safe", "0",
+          "-i", listPath,
+          "-c", "copy",
+          "-movflags", "+faststart",
+          outPath,
+        ];
+
+        try {
+          await runFfmpeg(fastArgs);
+        } catch (fastErr) {
+          console.warn(`[${jobId}] Fast concat failed, falling back to filter_complex re-encode:`, fastErr.message?.slice(0, 200));
+          method = "filter-reencode";
+          await runFilterReencodeConcat(localPaths, outPath, {
+            pauseBetweenSlides: 0,
+            introPause: 0,
+            isHoldFlags,
+          });
+        }
+      } else {
+        method = "filter-reencode-audio-mismatch";
         await runFilterReencodeConcat(localPaths, outPath, {
           pauseBetweenSlides: 0,
           introPause: 0,
