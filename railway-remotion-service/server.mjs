@@ -95,16 +95,29 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
 
   console.log(`[render] Job ${job_id}: received specData with ${specData.scenes?.length || 0} scenes, ${specData.captions?.length || 0} captions, overlays: ${Object.keys(specData.overlays || {}).join(",") || "none"}, css_effects: ${Object.keys(specData.css_effects || specData.cssEffects || {}).join(",") || "none"}`);
 
+  if (compositionId === "Explainer" && explainerWaiting >= EXPLAINER_MAX_WAITING) {
+    return res.status(503).json({ error: "Too many explainer videos waiting; try again in a few minutes." });
+  }
+
   // Respond immediately — rendering happens async
   res.json({ render_id: renderId, status: "rendering" });
 
-  // Async render
-  (async () => {
+  // Async render. Explainer videos wait their turn (one at a time): a landscape
+  // and a portrait of the same video arrive together, and two Chromes at once
+  // can run this container out of memory.
+  const run = async () => {
     const tmpOutput = `/tmp/render_${renderId}.mp4`;
     let browser;
     try {
-      // Report progress
-      await reportProgress(callback_url, callback_headers, job_id, 0);
+      // Report progress — only when it moves 5 points, not on every frame
+      // (each report is a call to Copilot's server).
+      let lastPct = -100;
+      const report = async (pct) => {
+        if (pct < 90 && pct - lastPct < 5) return;
+        lastPct = pct;
+        await reportProgress(callback_url, callback_headers, job_id, pct);
+      };
+      await report(0);
 
       const bundleUrl = await getBundleUrl();
 
@@ -127,7 +140,7 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
         inputProps: remotionInputProps,
       });
 
-      await reportProgress(callback_url, callback_headers, job_id, 10);
+      await report(10);
 
       // Render
       await renderMedia({
@@ -136,20 +149,20 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
         codec: "h264",
         outputLocation: tmpOutput,
         puppeteerInstance: browser,
-        concurrency: 1,
+        concurrency: compositionId === "Explainer" ? 2 : 1,
         muted: false,
         audioCodec: "aac",
         inputProps: remotionInputProps,
         onProgress: async ({ progress }) => {
           const pct = Math.round(10 + progress * 80); // 10-90%
-          await reportProgress(callback_url, callback_headers, job_id, pct);
+          await report(pct);
         },
       });
 
       await browser.close({ silent: false });
       browser = null;
 
-      await reportProgress(callback_url, callback_headers, job_id, 90);
+      await report(90);
 
       // Upload to storage via signed URL
       if (storage_upload?.signed_url || storage_upload?.signedUrl) {
@@ -169,18 +182,14 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
       // Clean up temp file
       if (fs.existsSync(tmpOutput)) fs.unlinkSync(tmpOutput);
 
-      // Callback: complete
+      // Callback: complete (retried — a lost "done" would leave the video stuck)
       if (callback_url) {
-        await fetch(callback_url, {
-          method: "POST",
-          headers: callback_headers || { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            job_id,
-            status: "complete",
-            render_id: renderId,
-            output_path,
-            duration_ms: Date.now() - startTime,
-          }),
+        await postWithRetry(callback_url, callback_headers, {
+          job_id,
+          status: "complete",
+          render_id: renderId,
+          output_path,
+          duration_ms: Date.now() - startTime,
         });
       }
 
@@ -190,21 +199,50 @@ app.post("/render-composition", authMiddleware, async (req, res) => {
       if (browser) await browser.close({ silent: false }).catch(() => {});
       if (fs.existsSync(tmpOutput)) fs.unlinkSync(tmpOutput);
 
-      // Callback: error
+      // Callback: error (retried; never throws)
       if (callback_url) {
-        await fetch(callback_url, {
-          method: "POST",
-          headers: callback_headers || { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            job_id,
-            status: "error",
-            error: err.message || "Unknown render error",
-          }),
+        await postWithRetry(callback_url, callback_headers, {
+          job_id,
+          status: "error",
+          error: err.message || "Unknown render error",
         });
       }
     }
-  })();
+  };
+  if (compositionId === "Explainer") {
+    explainerWaiting++;
+    explainerQueue = explainerQueue
+      .then(run, run)
+      .catch((e) => console.error(`[render] explainer job ${job_id} crashed:`, e))
+      .finally(() => { explainerWaiting--; });
+  } else {
+    run().catch((e) => console.error(`[render] job ${job_id} crashed:`, e));
+  }
 });
+
+// One explainer render at a time (see above), and a cap on the line: upload
+// links expire after 2 hours, so a much longer line would render for nothing.
+let explainerQueue = Promise.resolve();
+let explainerWaiting = 0;
+const EXPLAINER_MAX_WAITING = Number(process.env.EXPLAINER_MAX_WAITING) || 12;
+
+/** POST a JSON report to Copilot, up to 4 tries; never throws. */
+async function postWithRetry(url, headers, body) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: headers || { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (r.ok || (r.status >= 400 && r.status < 500 && r.status !== 429)) return;
+    } catch (e) {
+      // network trouble — try again
+    }
+    await new Promise((res) => setTimeout(res, 2000 * (attempt + 1)));
+  }
+  console.error(`[render] couldn't report ${body.status} for ${body.job_id}`);
+}
 
 // ---------- POST /extract-frames ----------
 //
