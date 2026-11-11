@@ -11,7 +11,7 @@ import { flip } from "@remotion/transitions/flip";
 import { iris } from "@remotion/transitions/iris";
 import { SceneView } from "./scenes";
 import { LookProvider, makeLook } from "./kit";
-import { cleanTheme, Theme } from "./theme";
+import { cleanLanguage, cleanTheme, themeForLanguage, Theme } from "./theme";
 import type { ExplainerSpec, Scene } from "./spec";
 
 // Remote files (Copilot's signed links) are used as-is; bare names come from public/.
@@ -80,18 +80,19 @@ const ZoomInner: React.FC<{ children: React.ReactNode; frames: number }> = ({ ch
 export const Explainer: React.FC<{ specData: ExplainerSpec }> = ({ specData }) => {
   const spec = specData;
   const { width, height } = useVideoConfig();
-  const theme = React.useMemo(() => cleanTheme(spec.look ?? "editorial"), [spec.look]);
+  const lang = React.useMemo(() => cleanLanguage(spec.language), [spec.language]);
+  const theme = React.useMemo(() => themeForLanguage(cleanTheme(spec.look ?? "editorial"), lang), [spec.look, lang]);
   const t = spec.transition_frames ?? 15;
   const scenes = spec.scenes;
   const timing = theme.transition === "fade" || theme.transition === "zoom"
     ? linearTiming({ durationInFrames: t })
     : springTiming({ config: { damping: 200 }, durationInFrames: t });
   return (
-    <AbsoluteFill style={{ background: "#000" }}>
+    <AbsoluteFill style={{ background: "#000", direction: lang.rtl ? "rtl" : "ltr" }} lang={lang.code} dir={lang.rtl ? "rtl" : "ltr"}>
       {spec.music_url ? <MusicBed url={spec.music_url} volume={spec.music_volume ?? 0.1} /> : null}
       <TransitionSeries>
         {scenes.flatMap((scene, i) => {
-          const look = makeLook(theme, spec.brand, isDark(theme, scene, i), !!scene.image_url);
+          const look = makeLook(theme, spec.brand, isDark(theme, scene, i), !!scene.image_url, lang);
           const out = [
             <TransitionSeries.Sequence key={`s${i}`} durationInFrames={Math.max(1, Math.round(scene.frames))}>
               <LookProvider look={look}>

@@ -5,80 +5,191 @@
 // made-up look can change everything about the feel without new code — and
 // without anything that could break a render. `cleanTheme` fills gaps and
 // clamps every field to a value the renderer knows.
-import { loadFont as anton } from "@remotion/google-fonts/Anton";
-import { loadFont as archivoBlack } from "@remotion/google-fonts/ArchivoBlack";
-import { loadFont as barlowCondensed } from "@remotion/google-fonts/BarlowCondensed";
-import { loadFont as bebas } from "@remotion/google-fonts/BebasNeue";
-import { loadFont as caveat } from "@remotion/google-fonts/Caveat";
-import { loadFont as dmSans } from "@remotion/google-fonts/DMSans";
-import { loadFont as fraunces } from "@remotion/google-fonts/Fraunces";
-import { loadFont as fredoka } from "@remotion/google-fonts/Fredoka";
-import { loadFont as inter } from "@remotion/google-fonts/Inter";
-import { loadFont as instrumentSerif } from "@remotion/google-fonts/InstrumentSerif";
-import { loadFont as kalam } from "@remotion/google-fonts/Kalam";
-import { loadFont as libreBaskerville } from "@remotion/google-fonts/LibreBaskerville";
-import { loadFont as lora } from "@remotion/google-fonts/Lora";
-import { loadFont as manrope } from "@remotion/google-fonts/Manrope";
-import { loadFont as montserrat } from "@remotion/google-fonts/Montserrat";
-import { loadFont as nunito } from "@remotion/google-fonts/Nunito";
-import { loadFont as oswald } from "@remotion/google-fonts/Oswald";
-import { loadFont as outfit } from "@remotion/google-fonts/Outfit";
-import { loadFont as patrickHand } from "@remotion/google-fonts/PatrickHand";
-import { loadFont as playfair } from "@remotion/google-fonts/PlayfairDisplay";
-import { loadFont as poppins } from "@remotion/google-fonts/Poppins";
-import { loadFont as quicksand } from "@remotion/google-fonts/Quicksand";
-import { loadFont as robotoSlab } from "@remotion/google-fonts/RobotoSlab";
-import { loadFont as sora } from "@remotion/google-fonts/Sora";
-import { loadFont as spaceGrotesk } from "@remotion/google-fonts/SpaceGrotesk";
+import * as anton from "@remotion/google-fonts/Anton";
+import * as archivoBlack from "@remotion/google-fonts/ArchivoBlack";
+import * as barlowCondensed from "@remotion/google-fonts/BarlowCondensed";
+import * as bebas from "@remotion/google-fonts/BebasNeue";
+import * as caveat from "@remotion/google-fonts/Caveat";
+import * as dmSans from "@remotion/google-fonts/DMSans";
+import * as fraunces from "@remotion/google-fonts/Fraunces";
+import * as fredoka from "@remotion/google-fonts/Fredoka";
+import * as inter from "@remotion/google-fonts/Inter";
+import * as instrumentSerif from "@remotion/google-fonts/InstrumentSerif";
+import * as kalam from "@remotion/google-fonts/Kalam";
+import * as libreBaskerville from "@remotion/google-fonts/LibreBaskerville";
+import * as lora from "@remotion/google-fonts/Lora";
+import * as manrope from "@remotion/google-fonts/Manrope";
+import * as montserrat from "@remotion/google-fonts/Montserrat";
+import * as nunito from "@remotion/google-fonts/Nunito";
+import * as oswald from "@remotion/google-fonts/Oswald";
+import * as outfit from "@remotion/google-fonts/Outfit";
+import * as patrickHand from "@remotion/google-fonts/PatrickHand";
+import * as playfair from "@remotion/google-fonts/PlayfairDisplay";
+import * as poppins from "@remotion/google-fonts/Poppins";
+import * as quicksand from "@remotion/google-fonts/Quicksand";
+import * as robotoSlab from "@remotion/google-fonts/RobotoSlab";
+import * as sora from "@remotion/google-fonts/Sora";
+import * as spaceGrotesk from "@remotion/google-fonts/SpaceGrotesk";
+// Fonts for languages with their own letters (2026-11-11).
+import * as notoSansSC from "@remotion/google-fonts/NotoSansSC";
+import * as notoSerifSC from "@remotion/google-fonts/NotoSerifSC";
+import * as notoSansJP from "@remotion/google-fonts/NotoSansJP";
+import * as notoSerifJP from "@remotion/google-fonts/NotoSerifJP";
+import * as notoSansKR from "@remotion/google-fonts/NotoSansKR";
+import * as notoSerifKR from "@remotion/google-fonts/NotoSerifKR";
+import * as notoSansArabic from "@remotion/google-fonts/NotoSansArabic";
+import * as notoNaskhArabic from "@remotion/google-fonts/NotoNaskhArabic";
+import * as notoSansDevanagari from "@remotion/google-fonts/NotoSansDevanagari";
+import * as notoSerifDevanagari from "@remotion/google-fonts/NotoSerifDevanagari";
 
-type Loader = () => { fontFamily: string };
-const L = (fn: any, weights: string[], italic = false): Loader => () => {
-  const r = fn("normal", { weights, subsets: ["latin"] });
-  if (italic) {
-    try {
-      fn("italic", { weights: [weights[0]], subsets: ["latin"] });
-    } catch {
-      /* this font has no italic */
-    }
-  }
-  return r;
-};
+type FontModule = { loadFont: (...a: any[]) => { fontFamily: string }; getInfo: () => { subsets: string[] } };
+type Style = "serif" | "slab" | "sans" | "rounded" | "condensed" | "hand";
+type FontDef = { mod: FontModule; weights: string[]; italic?: boolean; style: Style };
+const F = (mod: any, weights: string[], style: Style, italic = false): FontDef => ({ mod, weights, italic, style });
 
 // The fonts a look may use. Keys are what Copilot's AI picks from.
-export const FONTS: Record<string, Loader> = {
-  "instrument-serif": L(instrumentSerif, ["400"], true),
-  playfair: L(playfair, ["600", "800"], true),
-  fraunces: L(fraunces, ["600", "800"], true),
-  lora: L(lora, ["500", "700"], true),
-  "libre-baskerville": L(libreBaskerville, ["400", "700"], true),
-  "roboto-slab": L(robotoSlab, ["500", "800"]),
-  inter: L(inter, ["400", "500", "600", "700", "800"]),
-  "dm-sans": L(dmSans, ["400", "500", "700"]),
-  manrope: L(manrope, ["400", "600", "800"]),
-  montserrat: L(montserrat, ["500", "700", "900"], true),
-  poppins: L(poppins, ["400", "600", "800"]),
-  outfit: L(outfit, ["400", "600", "800"]),
-  sora: L(sora, ["400", "600", "800"]),
-  "space-grotesk": L(spaceGrotesk, ["400", "500", "700"]),
-  nunito: L(nunito, ["500", "700", "900"]),
-  quicksand: L(quicksand, ["500", "700"]),
-  fredoka: L(fredoka, ["500", "600"]),
-  anton: L(anton, ["400"]),
-  bebas: L(bebas, ["400"]),
-  oswald: L(oswald, ["500", "700"]),
-  "barlow-condensed": L(barlowCondensed, ["600", "800"], true),
-  "archivo-black": L(archivoBlack, ["400"]),
-  caveat: L(caveat, ["600", "700"]),
-  "patrick-hand": L(patrickHand, ["400"]),
-  kalam: L(kalam, ["400", "700"]),
+const DEFS: Record<string, FontDef> = {
+  "instrument-serif": F(instrumentSerif, ["400"], "serif", true),
+  playfair: F(playfair, ["600", "800"], "serif", true),
+  fraunces: F(fraunces, ["600", "800"], "serif", true),
+  lora: F(lora, ["500", "700"], "serif", true),
+  "libre-baskerville": F(libreBaskerville, ["400", "700"], "serif", true),
+  "roboto-slab": F(robotoSlab, ["500", "800"], "slab"),
+  inter: F(inter, ["400", "500", "600", "700", "800"], "sans"),
+  "dm-sans": F(dmSans, ["400", "500", "700"], "sans"),
+  manrope: F(manrope, ["400", "600", "800"], "sans"),
+  montserrat: F(montserrat, ["500", "700", "900"], "sans", true),
+  poppins: F(poppins, ["400", "600", "800"], "sans"),
+  outfit: F(outfit, ["400", "600", "800"], "sans"),
+  sora: F(sora, ["400", "600", "800"], "sans"),
+  "space-grotesk": F(spaceGrotesk, ["400", "500", "700"], "sans"),
+  nunito: F(nunito, ["500", "700", "900"], "rounded"),
+  quicksand: F(quicksand, ["500", "700"], "rounded"),
+  fredoka: F(fredoka, ["500", "600"], "rounded"),
+  anton: F(anton, ["400"], "condensed"),
+  bebas: F(bebas, ["400"], "condensed"),
+  oswald: F(oswald, ["500", "700"], "condensed"),
+  "barlow-condensed": F(barlowCondensed, ["600", "800"], "condensed", true),
+  "archivo-black": F(archivoBlack, ["400"], "condensed"),
+  caveat: F(caveat, ["600", "700"], "hand"),
+  "patrick-hand": F(patrickHand, ["400"], "hand"),
+  kalam: F(kalam, ["400", "700"], "hand"),
+  // Only used for a language's own letters (never offered to the look AI).
+  "noto-sans-sc": F(notoSansSC, ["500", "800"], "sans"),
+  "noto-serif-sc": F(notoSerifSC, ["500", "800"], "serif"),
+  "noto-sans-jp": F(notoSansJP, ["500", "800"], "sans"),
+  "noto-serif-jp": F(notoSerifJP, ["500", "800"], "serif"),
+  "noto-sans-kr": F(notoSansKR, ["500", "800"], "sans"),
+  "noto-serif-kr": F(notoSerifKR, ["500", "800"], "serif"),
+  "noto-sans-arabic": F(notoSansArabic, ["500", "800"], "sans"),
+  "noto-naskh-arabic": F(notoNaskhArabic, ["500", "700"], "serif"),
+  "noto-sans-devanagari": F(notoSansDevanagari, ["500", "800"], "sans"),
+  "noto-serif-devanagari": F(notoSerifDevanagari, ["500", "800"], "serif"),
 };
+const LANGUAGE_ONLY = new Set(Object.keys(DEFS).filter((k) => k.startsWith("noto-")));
+
+/** Font keys a look may name (the language-only fonts are picked here, not by looks). */
+export const FONTS: Record<string, true> = Object.fromEntries(Object.keys(DEFS).filter((k) => !LANGUAGE_ONLY.has(k)).map((k) => [k, true]));
+
+// ── languages (2026-11-11) ───────────────────────────────────────────────
+// The letters a video's language needs, and the font subset that has them.
+export type Script = "latin" | "vietnamese" | "cyrillic" | "sc" | "ja" | "ko" | "arabic" | "devanagari";
+export type VideoLanguage = { code: string; script: Script; rtl: boolean; no_spaces: boolean };
+const SCRIPTS: Script[] = ["latin", "vietnamese", "cyrillic", "sc", "ja", "ko", "arabic", "devanagari"];
+const SUBSET: Record<Script, string> = {
+  latin: "latin-ext",
+  vietnamese: "vietnamese",
+  cyrillic: "cyrillic",
+  sc: "chinese-simplified",
+  ja: "japanese",
+  ko: "korean",
+  arabic: "arabic",
+  devanagari: "devanagari",
+};
+export function cleanLanguage(v: any): VideoLanguage {
+  const script = SCRIPTS.includes(v?.script) ? (v.script as Script) : "latin";
+  return { code: String(v?.code ?? "en").slice(0, 8), script, rtl: !!v?.rtl, no_spaces: !!v?.no_spaces };
+}
+
+// A look's font that lacks the language's letters is swapped for the nearest
+// font in the same style that has them (first one that does, in this order).
+const SWAPS: Record<Style, string[]> = {
+  serif: ["playfair", "lora", "fraunces", "roboto-slab", "inter"],
+  slab: ["roboto-slab", "lora", "inter"],
+  sans: ["montserrat", "inter", "manrope", "poppins", "space-grotesk"],
+  rounded: ["nunito", "quicksand", "montserrat", "inter"],
+  condensed: ["oswald", "anton", "barlow-condensed", "montserrat", "inter"],
+  hand: ["patrick-hand", "caveat", "kalam", "nunito", "inter"],
+};
+const OWN_LETTERS: Partial<Record<Script, { serif: string; sans: string; hand?: string }>> = {
+  sc: { serif: "noto-serif-sc", sans: "noto-sans-sc" },
+  ja: { serif: "noto-serif-jp", sans: "noto-sans-jp" },
+  ko: { serif: "noto-serif-kr", sans: "noto-sans-kr" },
+  arabic: { serif: "noto-naskh-arabic", sans: "noto-sans-arabic" },
+  devanagari: { serif: "noto-serif-devanagari", sans: "noto-sans-devanagari", hand: "kalam" },
+};
+const has = (key: string, script: Script) => DEFS[key]?.mod.getInfo().subsets.includes(SUBSET[script]) ?? false;
+
+/** The font to use for this look font in this language. */
+export function fontFor(key: string, script: Script): string {
+  const k = DEFS[key] ? key : "inter";
+  const style = DEFS[k].style;
+  const own = OWN_LETTERS[script];
+  if (own) {
+    if (style === "hand" && own.hand) return own.hand;
+    if (script === "devanagari" && style !== "serif" && has(k, script)) return k; // e.g. Poppins
+    return style === "serif" || style === "slab" ? own.serif : own.sans;
+  }
+  if (has(k, script)) return k;
+  return SWAPS[style].find((x) => has(x, script)) ?? "inter";
+}
 
 const loaded = new Map<string, string>();
-export const fontFamily = (key: string): string => {
-  const k = FONTS[key] ? key : "inter";
-  if (!loaded.has(k)) loaded.set(k, FONTS[k]().fontFamily);
-  return loaded.get(k)!;
+/** Load a font (just the letters this language needs) and return its CSS family. */
+export const fontFamily = (key: string, script: Script = "latin"): string => {
+  const k = DEFS[key] ? key : "inter";
+  const id = `${k}|${script}`;
+  if (!loaded.has(id)) {
+    const d = DEFS[k];
+    const avail = d.mod.getInfo().subsets;
+    // Chinese, Japanese and Korean fonts come in ~100 numbered slices rather
+    // than one named subset: those load whole (no subset list).
+    const sliced = k.startsWith("noto-") && ["sc", "ja", "ko"].includes(script);
+    const subsets = sliced ? undefined : ["latin", SUBSET[script]].filter((x, i, a) => avail.includes(x) && a.indexOf(x) === i);
+    const r = d.mod.loadFont("normal", { weights: d.weights, subsets, ignoreTooManyRequestsWarning: true });
+    if (d.italic) {
+      try {
+        d.mod.loadFont("italic", { weights: [d.weights[0]], subsets, ignoreTooManyRequestsWarning: true });
+      } catch {
+        /* this font has no italic */
+      }
+    }
+    loaded.set(id, r.fontFamily);
+  }
+  return loaded.get(id)!;
 };
+
+/** The look, fitted to the language: fonts that have its letters, and no
+ *  effects that break its writing (letter spacing and per-letter typing
+ *  tear Arabic and Hindi letters apart; those scripts have no capitals or
+ *  italics). */
+export function themeForLanguage(t: Theme, lang: VideoLanguage): Theme {
+  const out = { ...t, head: fontFor(t.head, lang.script), body: fontFor(t.body, lang.script) };
+  // A loud or hand-written body font is hard to read in another alphabet.
+  if (lang.script !== "latin" && ["condensed", "hand"].includes(DEFS[out.body]?.style ?? "")) out.body = fontFor("inter", lang.script);
+  const joined = lang.script === "arabic" || lang.script === "devanagari";
+  const ownLetters = !!OWN_LETTERS[lang.script];
+  if (joined) {
+    out.tracking = 0;
+    if (out.headlineIn === "type") out.headlineIn = "rise";
+  }
+  if (ownLetters) {
+    out.headItalicAccent = false;
+    out.tracking = Math.min(out.tracking, 0);
+    out.headScale = Math.min(out.headScale, 1);
+  }
+  return out;
+}
 
 export type Palette = { bg: string; ink: string; muted: string; surface: string; line: string };
 

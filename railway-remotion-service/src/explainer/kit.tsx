@@ -5,7 +5,7 @@
 // built-in looks — and any look a user describes — feel different.
 import React from "react";
 import { AbsoluteFill, Easing, Img, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
-import { Palette, Theme, LOOKS, contrast, fontFamily, lum, mix, onColor, resolve } from "./theme";
+import { Palette, Theme, LOOKS, VideoLanguage, cleanLanguage, contrast, fontFamily, lum, mix, onColor, resolve } from "./theme";
 
 export type Brand = {
   name: string;
@@ -32,18 +32,27 @@ export type Look = {
   head: string; // headline font family
   body: string; // body font family
   picture: boolean; // a full-bleed picture is behind this scene
+  lang: VideoLanguage; // the video's language (fonts, right-to-left, no spaces)
+};
+
+/** How wide a text is, in Latin letters: Chinese, Japanese and Korean
+ *  characters take about two (for picking headline sizes). */
+export const vlen = (t: string) => {
+  let n = 0;
+  for (const ch of t || "") n += /[\u1100-\u11ff\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/.test(ch) ? 2 : 1;
+  return n;
 };
 
 const defaultLook = (): Look => {
   const theme = LOOKS.editorial;
   const brand: Brand = { name: "", initials: "", primary: "#1F4E79", accent: "#C8761E", phone: "", website: "" };
-  return { theme, brand, dark: false, pal: theme.light, head: "serif", body: "sans-serif", picture: false };
+  return { theme, brand, dark: false, pal: theme.light, head: "serif", body: "sans-serif", picture: false, lang: cleanLanguage(null) };
 };
 
 const LookContext = React.createContext<Look | null>(null);
 export const useLook = (): Look => React.useContext(LookContext) ?? defaultLook();
 
-export function makeLook(theme: Theme, brand: Brand, dark: boolean, picture: boolean): Look {
+export function makeLook(theme: Theme, brand: Brand, dark: boolean, picture: boolean, lang: VideoLanguage = cleanLanguage(null)): Look {
   const raw = dark || picture ? theme.dark : theme.light;
   let pal: Palette = {
     bg: resolve(raw.bg, brand),
@@ -67,7 +76,16 @@ export function makeLook(theme: Theme, brand: Brand, dark: boolean, picture: boo
   } else if (contrast(pal.muted, pal.bg) < 3) {
     pal = { ...pal, muted: mix(pal.ink, pal.bg, 0.3) };
   }
-  return { theme, brand, dark: dark || picture, pal, head: fontFamily(theme.head), body: fontFamily(theme.body), picture };
+  return {
+    theme,
+    brand,
+    dark: dark || picture,
+    pal,
+    head: fontFamily(theme.head, lang.script),
+    body: fontFamily(theme.body, lang.script),
+    picture,
+    lang,
+  };
 }
 
 export const LookProvider: React.FC<{ look: Look; children: React.ReactNode }> = ({ look, children }) => (
@@ -350,7 +368,7 @@ export const Caption: React.FC<{ lines: { at: number; text: string }[] }> = ({ l
       break;
     case "block":
       inner = (
-        <div style={{ ...box, display: "flex", alignItems: "stretch", textAlign: "left" }}>
+        <div style={{ ...box, display: "flex", alignItems: "stretch", textAlign: "start" }}>
           <div style={{ background: L.brand.accent, color: onColor(L.brand.accent), padding: "12px 16px", fontWeight: 800 }}>▶</div>
           <div style={{ background: "#FFFFFF", color: "#0B1220", padding: "12px 22px" }}>{current.text}</div>
         </div>
@@ -396,7 +414,17 @@ export const Headline: React.FC<{
   const L = useLook();
   const t = L.theme;
   const sz = Math.round(size * t.headScale * (t.headUpper ? 0.82 : 1));
-  const words = (text || "").split(" ").filter(Boolean);
+  // Words animate one by one. Languages written without spaces (Chinese,
+  // Japanese) animate per character instead, keeping a *starred* phrase whole.
+  const words = L.lang.no_spaces
+    ? (text || "").split(/(\*[^*]+\*)/g).flatMap((part) =>
+        part.startsWith("*") && part.endsWith("*") && part.length > 2
+          ? [part]
+          : // each Chinese/Japanese character alone; other words (e.g. "Plan G") whole, with their spaces
+            part.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u3000-\u303f\uff00-\uffef]|[^\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u3000-\u303f\uff00-\uffef]+|\s+/gu) ?? [],
+      )
+    : (text || "").split(" ").filter(Boolean);
+  const stagger = L.lang.no_spaces ? 1.5 : 3;
   let shown = 0; // for "type": letters revealed so far
   const letterRate = 1.6; // letters per frame
   const totalLetters = Math.max(0, (frame - delay) * letterRate);
@@ -409,17 +437,17 @@ export const Headline: React.FC<{
         lineHeight: t.headUpper ? 1.0 : 1.08,
         letterSpacing: t.tracking,
         textTransform: t.headUpper ? "uppercase" : "none",
-        textAlign: align,
+        textAlign: align === "left" ? "start" : align,
         color: color ?? L.pal.ink,
         display: "flex",
         flexWrap: "wrap",
         justifyContent: align === "center" ? "center" : "flex-start",
-        columnGap: sz * 0.26,
+        columnGap: L.lang.no_spaces ? 0 : sz * 0.26,
       }}
     >
       {words.map((w, i) => {
         const starred = w.includes("*");
-        const clean = w.replace(/\*/g, "");
+        const clean = /^\s+$/.test(w) ? "\u00a0" : w.replace(/\*/g, "");
         const style: React.CSSProperties = {
           display: "inline-block",
           fontStyle: starred && t.headItalicAccent ? "italic" : "normal",
@@ -433,7 +461,7 @@ export const Headline: React.FC<{
             borderRadius: Math.min(t.radius, 12),
           });
         }
-        const p = spring({ frame: frame - delay - i * 3, fps, config: { damping: t.headlineIn === "pop" ? 11 : 200 } });
+        const p = spring({ frame: frame - delay - i * stagger, fps, config: { damping: t.headlineIn === "pop" ? 11 : 200 } });
         switch (t.headlineIn) {
           case "pop":
             Object.assign(style, { opacity: Math.min(1, p * 1.5), transform: `scale(${0.4 + 0.6 * p})` });
@@ -446,7 +474,7 @@ export const Headline: React.FC<{
             break;
           case "type": {
             const start = shown;
-            shown += clean.length + 1;
+            shown += clean.length + (L.lang.no_spaces ? 0 : 1);
             const n = Math.max(0, Math.min(clean.length, Math.floor(totalLetters - start)));
             return (
               <span key={i} style={style}>

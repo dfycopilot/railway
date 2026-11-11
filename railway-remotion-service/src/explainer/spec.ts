@@ -87,6 +87,9 @@ export type ExplainerSpec = {
   // The look (2026-11-11): a built-in id ("editorial", "bold", "clean",
   // "bright", "notebook", "newsroom") or a whole custom look (theme.ts).
   look?: string | Record<string, unknown> | null;
+  // The video's language (2026-11-11): which letters the fonts need, whether
+  // it reads right to left, and whether it's written without spaces.
+  language?: { code: string; script: string; rtl?: boolean; no_spaces?: boolean } | null;
   scenes: Scene[];
 };
 

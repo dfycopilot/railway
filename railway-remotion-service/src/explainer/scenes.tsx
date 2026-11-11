@@ -22,6 +22,7 @@ import {
   usePortrait,
   useRise,
   visible,
+  vlen,
 } from "./kit";
 import { mix, onColor } from "./theme";
 import type {
@@ -59,9 +60,9 @@ const Title: React.FC<{ s: TitleScene }> = ({ s }) => {
   const L = useLook();
   const v = variantOf(s, 3);
   const frame = useCurrentFrame();
-  const size = fit(s.headline.length, P ? 124 : 150, P ? 100 : 118, 24);
+  const size = fit(vlen(s.headline), P ? 124 : 150, P ? 100 : 118, 24);
   const sub = s.subline ? (
-    <div style={{ ...useRise(30), fontSize: P ? 44 : 38, color: L.pal.muted, fontWeight: 500, textAlign: v === 1 ? "left" : "center" }}>
+    <div style={{ ...useRise(30), fontSize: P ? 44 : 38, color: L.pal.muted, fontWeight: 500, textAlign: v === 1 ? "start" : "center" }}>
       {s.subline}
     </div>
   ) : null;
@@ -273,7 +274,7 @@ const Checklist: React.FC<{ s: ChecklistScene }> = ({ s }) => {
   const v = variantOf(s, 3);
   const items = (s.items ?? []).slice(0, 6);
   const sub = s.subline ? (
-    <div style={{ ...useRise(20), fontSize: P ? 34 : 32, color: L.pal.muted, marginTop: 28, lineHeight: 1.4, textAlign: v === 0 || P ? "left" : "center" }}>
+    <div style={{ ...useRise(20), fontSize: P ? 34 : 32, color: L.pal.muted, marginTop: 28, lineHeight: 1.4, textAlign: v === 0 || P ? "start" : "center" }}>
       {s.subline}
     </div>
   ) : null;
@@ -285,7 +286,7 @@ const Checklist: React.FC<{ s: ChecklistScene }> = ({ s }) => {
         <Camera>
           <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", gap: 44, paddingBottom: P ? 260 : 40, paddingTop: P ? 0 : 70 }}>
             <div style={{ maxWidth: P ? 940 : 1400 }}>
-              <Headline text={s.headline} size={fit(s.headline.length, P ? 100 : 92, P ? 80 : 76, 26)} />
+              <Headline text={s.headline} size={fit(vlen(s.headline), P ? 100 : 92, P ? 80 : 76, 26)} />
               {sub}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -308,7 +309,7 @@ const Checklist: React.FC<{ s: ChecklistScene }> = ({ s }) => {
         <Camera>
           <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", gap: 60, paddingTop: 60 }}>
             <div style={{ maxWidth: 1500 }}>
-              <Headline text={s.headline} size={fit(s.headline.length, 96, 78, 26)} />
+              <Headline text={s.headline} size={fit(vlen(s.headline), 96, 78, 26)} />
               {sub}
             </div>
             <div style={{ display: "flex", gap: 80 }}>
@@ -339,7 +340,7 @@ const Checklist: React.FC<{ s: ChecklistScene }> = ({ s }) => {
           }
         >
           <div style={{ width: P ? 920 : 620 }}>
-            <Headline text={s.headline} size={fit(s.headline.length, 110, 84, 22)} align="left" />
+            <Headline text={s.headline} size={fit(vlen(s.headline), 110, 84, 22)} align="left" />
             {sub}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -449,7 +450,7 @@ const Column: React.FC<{ heading: string; points: string[]; color: string; delay
           fontFamily: L.head,
           fontWeight: L.theme.headWeight,
           textTransform: L.theme.headUpper ? "uppercase" : "none",
-          fontSize: fit(heading.length, 80, 64, 22) * L.theme.headScale,
+          fontSize: fit(vlen(heading), 80, 64, 22) * L.theme.headScale,
         }}
       >
         <Starred text={heading} />
@@ -628,7 +629,7 @@ const Stat: React.FC<{ s: StatScene }> = ({ s }) => {
   const v = variantOf(s, 2);
   const d = cueOf(s, 0, 0, 10);
   const p = spring({ frame: frame - d, fps, config: { damping: 14, mass: 0.8 } });
-  const big = fit((s.value ?? "").length, P ? 300 : 340, P ? 200 : 240, 5) * L.theme.headScale;
+  const big = fit(vlen(s.value ?? ""), P ? 300 : 340, P ? 200 : 240, 5) * L.theme.headScale;
   const valueStyle: React.CSSProperties = {
     fontFamily: L.head,
     fontWeight: L.theme.headWeight,
@@ -648,12 +649,12 @@ const Stat: React.FC<{ s: StatScene }> = ({ s }) => {
     });
   }
   const label = (
-    <div style={{ ...useRise(d + 12), fontFamily: L.head, fontWeight: L.theme.headWeight, fontSize: P ? 64 : 70, textAlign: v === 1 && !P ? "left" : "center", lineHeight: 1.1, textTransform: L.theme.headUpper ? "uppercase" : "none" }}>
+    <div style={{ ...useRise(d + 12), fontFamily: L.head, fontWeight: L.theme.headWeight, fontSize: P ? 64 : 70, textAlign: v === 1 && !P ? "start" : "center", lineHeight: 1.1, textTransform: L.theme.headUpper ? "uppercase" : "none" }}>
       {s.label}
     </div>
   );
   const note = s.note ? (
-    <div style={{ ...useRise(d + 24), fontSize: P ? 34 : 32, color: L.pal.muted, textAlign: v === 1 && !P ? "left" : "center", maxWidth: 1100, marginTop: 16 }}>{s.note}</div>
+    <div style={{ ...useRise(d + 24), fontSize: P ? 34 : 32, color: L.pal.muted, textAlign: v === 1 && !P ? "start" : "center", maxWidth: 1100, marginTop: 16 }}>{s.note}</div>
   ) : null;
   if (v === 1 && !P) {
     return (
@@ -728,7 +729,7 @@ const PhoneView: React.FC<{ s: PhoneScene }> = ({ s }) => {
       <Camera amount={Math.min(0.03, L.theme.camera)}>
         <AbsoluteFill>
           <div style={{ position: "absolute", left: P ? 80 : flip ? 860 : 160, top: P ? 270 : 330, width: P ? 920 : 820 }}>
-            <Headline text={s.headline} size={fit(s.headline.length, P ? 112 : 120, P ? 88 : 96, 20)} align="left" />
+            <Headline text={s.headline} size={fit(vlen(s.headline), P ? 112 : 120, P ? 88 : 96, 20)} align="left" />
             <div style={{ ...useRise(24), fontSize: P ? 38 : 34, color: L.pal.muted, marginTop: 26, lineHeight: 1.4 }}>{s.text}</div>
           </div>
           <Phone style={{ position: "absolute", left: phoneLeft, top: phoneTop, height: phoneH, ...useRise(6, 80) }}>
@@ -806,13 +807,13 @@ const End: React.FC<{ s: EndScene }> = ({ s }) => {
       <Stage image={s.image_url}>
         <AbsoluteFill style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 100, padding: "0 140px 120px" }}>
           <div style={{ width: 860 }}>
-            <Headline text={s.headline} size={fit(s.headline.length, 104, 84, 34)} delay={8} align="left" />
+            <Headline text={s.headline} size={fit(vlen(s.headline), 104, 84, 34)} delay={8} align="left" />
           </div>
           <div style={{ ...cardStyle(L), ...useItemIn(30), padding: 50, width: 560, display: "flex", flexDirection: "column", gap: 22, alignItems: "flex-start" }}>
             <Logo brand={brand} size={100} />
             <div style={{ fontSize: 38, fontWeight: 800 }}>{brand.name}</div>
             {contact.map((c, i) => (
-              <div key={i} style={{ fontSize: 32, color: surfaceMuted(L) }}>
+              <div key={i} dir="ltr" style={{ fontSize: 32, color: surfaceMuted(L), unicodeBidi: "isolate" }}>
                 {c}
               </div>
             ))}
@@ -828,7 +829,7 @@ const End: React.FC<{ s: EndScene }> = ({ s }) => {
         <div style={useRise(4)}>
           <Logo brand={brand} size={110} />
         </div>
-        <Headline text={s.headline} size={fit(s.headline.length, P ? 110 : 104, P ? 88 : 84, 34)} delay={12} />
+        <Headline text={s.headline} size={fit(vlen(s.headline), P ? 110 : 104, P ? 88 : 84, 34)} delay={12} />
         <div
           style={{
             ...useRise(40),
@@ -844,7 +845,7 @@ const End: React.FC<{ s: EndScene }> = ({ s }) => {
           {contact.map((c, i) => (
             <React.Fragment key={i}>
               {!P && <span style={{ opacity: 0.4 }}>·</span>}
-              <span>{c}</span>
+              <span dir="ltr" style={{ unicodeBidi: "isolate" }}>{c}</span>
             </React.Fragment>
           ))}
         </div>
