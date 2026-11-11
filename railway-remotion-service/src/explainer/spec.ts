@@ -13,6 +13,8 @@ type Base = {
   captions: Caption[];
   cues: number[]; // frames where each item appears, in item order
   tag?: string; // small section label, e.g. "WHAT BOTH COVER"
+  variant?: number; // which layout of this scene type (2026-11-11), any number; wraps
+  image_url?: string | null; // a picture behind this scene (AI-made or the agent's own)
 };
 
 // A headline may wrap one or more words in *stars* to set them in the accent color.
@@ -82,6 +84,9 @@ export type ExplainerSpec = {
   music_url?: string | null;
   music_volume?: number; // default 0.1, about 20 dB under the voice
   transition_frames?: number; // cross-fade, default 15
+  // The look (2026-11-11): a built-in id ("editorial", "bold", "clean",
+  // "bright", "notebook", "newsroom") or a whole custom look (theme.ts).
+  look?: string | Record<string, unknown> | null;
   scenes: Scene[];
 };
 
