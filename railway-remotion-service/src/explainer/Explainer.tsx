@@ -74,7 +74,7 @@ const ZoomIn: React.FC<{ children: React.ReactNode; frames: number; on: boolean;
 };
 const ZoomInner: React.FC<{ children: React.ReactNode; frames: number; from: number }> = ({ children, frames, from }) => {
   const f = useCurrentFrame();
-  const s = interpolate(f, [0, frames], [from, 1], { extrapolateRight: "clamp", easing: Easing.out(Easing.cubic) });
+  const s = interpolate(f, [0, frames], [from, 1], from === 1.12 ? { extrapolateRight: "clamp" } : { extrapolateRight: "clamp", easing: Easing.out(Easing.cubic) });
   return <AbsoluteFill style={{ transform: `scale(${s})` }}>{children}</AbsoluteFill>;
 };
 

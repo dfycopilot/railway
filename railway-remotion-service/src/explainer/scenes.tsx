@@ -180,7 +180,7 @@ const Card: React.FC<{ badge: string; title: string; text: string; color: string
         <div style={{ fontFamily: L.head, fontWeight: L.theme.headWeight, fontSize: row ? 46 : 52, lineHeight: 1.05, textTransform: L.theme.headUpper ? "uppercase" : "none" }}>
           {title}
         </div>
-        <div style={{ fontSize: L.social ? 36 : 28, color: surfaceMuted(L), lineHeight: 1.35, marginTop: row ? 8 : 18 }}>{text}</div>
+        <div style={{ fontSize: L.social ? 36 : 28, color: surfaceMuted(L), lineHeight: L.social ? 1.35 : 1.4, marginTop: row ? 8 : 18 }}>{text}</div>
       </div>
     </div>
   );
@@ -267,7 +267,7 @@ const Check: React.FC<{ text: string; delay: number; color: string; width: numbe
           strokeDashoffset={tick}
         />
       </svg>
-      <div style={{ fontSize: big ? 44 : 32, fontWeight: big ? 700 : 500, lineHeight: 1.2 }}>{text}</div>
+      <div style={{ fontSize: big ? 44 : 32, fontWeight: big ? 700 : 500, ...(big ? { lineHeight: 1.2 } : {}) }}>{text}</div>
     </div>
   );
 };

@@ -7,11 +7,16 @@
  *
  * Safety: the service lives on Railway's private network, so every URL the
  * browser touches (first page, redirects, sub-resources) must resolve to a
- * public address. See checkUrl() / isPublicIp().
+ * public address. See checkUrl() / isPublicIp(). Since 2026-11-12 (review):
+ * EVERY connection Chromium makes goes through a local gate (proxy) that
+ * resolves the host itself, checks the address and connects to exactly that
+ * address — Chromium's own DNS lookup could otherwise answer differently from
+ * ours (DNS rebinding), and service/shared workers skip request interception.
  */
 
 import dns from "dns/promises";
 import fs from "fs";
+import http from "http";
 import net from "net";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -24,8 +29,9 @@ const VIEW_W = 430;
 const VIEW_H = 932;
 const DPR = 2;
 const NAV_TIMEOUT_MS = 20_000;
-const JOB_TIMEOUT_MS = 45_000;
-const QUEUE_WAIT_MS = 30_000;
+// Copilot waits 55 s for the whole answer: queue + job stay under that.
+const JOB_TIMEOUT_MS = 38_000;
+const QUEUE_WAIT_MS = 12_000;
 const MAX_CONCURRENT = 2;
 const MAX_SCROLL_PX = 6000;
 const MAX_CAPTURE_PX = 3000;
@@ -143,6 +149,104 @@ export async function checkUrl(raw) {
   return r;
 }
 
+// ---------- the network gate (proxy) ----------
+/** A public address for host:port, or null. Shape rules as checkUrlShape. */
+async function gateAddress(host, port) {
+  let shape;
+  try {
+    const h = net.isIP(host) === 6 ? `[${host}]` : host;
+    shape = checkUrlShape(`${port === 80 ? "http" : "https"}://${h}:${port}/`);
+  } catch {
+    return null;
+  }
+  if (shape.ip) return shape.ip;
+  try {
+    const addrs = await dns.lookup(shape.host, { all: true, verbatim: true });
+    if (!addrs.length || !addrs.every((a) => isPublicIp(a.address))) return null;
+    return addrs[0].address;
+  } catch {
+    return null;
+  }
+}
+
+const IDLE_MS = 30_000;
+function onGateConnect(req, client, head) {
+  // CONNECT host:port (https, wss)
+  let target;
+  try {
+    target = new URL(`http://${req.url}`);
+  } catch {
+    client.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+    return;
+  }
+  const port = Number(target.port || 443);
+  const host = target.hostname.replace(/^\[|\]$/g, "");
+  gateAddress(host, port).then((addr) => {
+    if (!addr || client.destroyed) {
+      client.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+      return;
+    }
+    const up = net.connect({ host: addr, port });
+    const kill = () => { up.destroy(); client.destroy(); };
+    up.setTimeout(IDLE_MS, kill);
+    client.setTimeout(IDLE_MS, kill);
+    up.on("error", kill);
+    client.on("error", kill);
+    up.on("connect", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head?.length) up.write(head);
+      up.pipe(client);
+      client.pipe(up);
+    });
+  });
+}
+function onGateRequest(req, res) {
+  // plain http: the request line carries the absolute URL
+  let u;
+  try {
+    u = new URL(req.url);
+  } catch {
+    res.writeHead(400).end();
+    return;
+  }
+  if (u.protocol !== "http:") {
+    res.writeHead(400).end();
+    return;
+  }
+  const port = Number(u.port || 80);
+  gateAddress(u.hostname.replace(/^\[|\]$/g, ""), port).then((addr) => {
+    if (!addr) {
+      res.writeHead(403).end();
+      return;
+    }
+    const headers = { ...req.headers, host: u.host };
+    delete headers["proxy-connection"];
+    delete headers["proxy-authorization"];
+    const up = http.request({ host: addr, port, method: req.method, path: u.pathname + u.search, headers, timeout: IDLE_MS }, (r) => {
+      res.writeHead(r.statusCode || 502, r.headers);
+      r.pipe(res);
+    });
+    up.on("timeout", () => up.destroy());
+    up.on("error", () => {
+      if (!res.headersSent) res.writeHead(502);
+      res.end();
+    });
+    req.pipe(up);
+  });
+}
+let gatePort = null;
+function startGate() {
+  if (gatePort) return gatePort;
+  gatePort = new Promise((resolve, reject) => {
+    const srv = http.createServer(onGateRequest);
+    srv.on("connect", onGateConnect);
+    srv.on("clientError", (_e, sock) => { try { sock.destroy(); } catch {} });
+    srv.once("error", (e) => { gatePort = null; reject(e); });
+    srv.listen(0, "127.0.0.1", () => resolve(srv.address().port));
+  });
+  return gatePort;
+}
+
 // ---------- browser ----------
 function findChrome() {
   if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
@@ -178,6 +282,7 @@ const LAUNCH_ARGS = [
   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
   "--webrtc-ip-handling-policy=disable_non_proxied_udp",
   "--disable-features=NetworkPrediction,Prerender2,BackForwardCache,MediaRouter,DialMediaRouteProvider",
+  "--disable-quic", // UDP would skip the gate
 ];
 
 // ---------- concurrency gate ----------
@@ -210,10 +315,13 @@ function release() {
 
 // ---------- the capture ----------
 async function capture(startUrl, state) {
+  const port = await startGate();
   const browser = await puppeteer.launch({
     executablePath: findChrome(),
     headless: true,
-    args: LAUNCH_ARGS,
+    // Everything through the gate; "<-loopback>" stops Chromium from ever
+    // skipping it for localhost.
+    args: [...LAUNCH_ARGS, `--proxy-server=http://127.0.0.1:${port}`, "--proxy-bypass-list=<-loopback>"],
     protocolTimeout: 30_000,
   });
   if (state.done) { // job already timed out while Chromium was starting
@@ -227,6 +335,10 @@ async function capture(startUrl, state) {
   browser.on("targetcreated", async (t) => {
     if (t.type() === "page" && mainTarget && t !== mainTarget) {
       try { const p = await t.page(); await p?.close(); } catch {}
+    }
+    // Workers we don't need (their requests also go through the gate).
+    if (t.type() === "service_worker" || t.type() === "shared_worker") {
+      try { const s = await t.createCDPSession(); await s.send("Runtime.terminateExecution").catch(() => {}); await s.detach(); } catch {}
     }
   });
 
@@ -365,17 +477,15 @@ async function capture(startUrl, state) {
     await page.evaluate(() => Promise.race([document.fonts?.ready, new Promise((r) => setTimeout(r, 2000))]));
   } catch {}
 
-  // Make the viewport as tall as the capture, THEN measure, so the element
-  // boxes and the screenshot come from the same layout (a full-page shot
-  // re-lays-out fixed popups and 100vh blocks, which would misalign boxes).
+  // The window stays phone-sized (a tall window stretched every "full
+  // screen" section, 2026-11-12 review); the shot reaches below it. Measured
+  // and shot from the same layout, at the top of the page (tested: a 100vh
+  // hero stays one screen tall and the boxes land where they were measured).
   const docHeight = await page.evaluate(() =>
     Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, window.innerHeight));
   const clipH = Math.max(VIEW_H, Math.min(Math.ceil(docHeight), MAX_CAPTURE_PX));
-  if (clipH !== VIEW_H) {
-    await page.setViewport({ width: VIEW_W, height: clipH, deviceScaleFactor: DPR, isMobile: true, hasTouch: true });
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await sleep(500);
-  }
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await sleep(300);
 
   const info = await page.evaluate(collectInPage, { DPR, CAPTURE_H: clipH, MAX_ELEMENTS, MAX_TEXT, VIEW_W });
 
@@ -383,7 +493,7 @@ async function capture(startUrl, state) {
     type: "jpeg",
     quality: 82,
     clip: { x: 0, y: 0, width: VIEW_W, height: clipH },
-    captureBeyondViewport: false,
+    captureBeyondViewport: true,
   });
 
   return {
