@@ -26,7 +26,7 @@ import {
   SceneWordsProvider,
 } from "./kit";
 import { mix, onColor } from "./theme";
-import { DateView, Hook, Media, Profile, Quote, Screen, SocialEnd, Stamps, Tip } from "./social";
+import { DateView, Hook, Media, Profile, Quote, ReloopSticker, Screen, SocialEnd, Stamps, Tip } from "./social";
 import type {
   CardsScene,
   ChecklistScene,
@@ -865,6 +865,7 @@ const End: React.FC<{ s: EndScene }> = ({ s }) => {
 export const SceneView: React.FC<{ scene: Scene }> = ({ scene }) => (
   <SceneWordsProvider words={scene.words}>
     <SceneBody scene={scene} />
+    {scene.reloop ? <ReloopSticker reloop={scene.reloop} /> : null}
   </SceneWordsProvider>
 );
 

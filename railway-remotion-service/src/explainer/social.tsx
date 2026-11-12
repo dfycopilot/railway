@@ -1262,3 +1262,55 @@ export const SocialEnd: React.FC<{ s: EndScene }> = ({ s }) => {
   );
 };
 
+
+// ── reloop sticker (2026-11-12) ─────────────────────────────────────────────
+// A curiosity line ("WAIT FOR IT…", "BEST PART NEXT ↓") slams in when the
+// voice says it, so the reloop works with the sound off too. Sits above the
+// caption band in portrait, bottom-right in landscape.
+export const ReloopSticker: React.FC<{ reloop?: { text: string; at: number } | null }> = ({ reloop }) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const P = usePortrait();
+  const L = useLook();
+  const text = String(reloop?.text ?? "").trim();
+  const at = Number(reloop?.at);
+  if (!L.social || !text || !Number.isFinite(at) || frame < at) return null;
+  const p = spring({ frame: frame - at, fps, config: { damping: 11, stiffness: 180, mass: 0.7 } });
+  const bg = visible(L, L.brand.accent);
+  const size = P ? (vlen(text) > 18 ? 46 : 54) : vlen(text) > 18 ? 38 : 44;
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: P ? 0 : undefined,
+        right: P ? 0 : 90,
+        top: P ? 1196 : undefined,
+        bottom: P ? undefined : 190,
+        display: "flex",
+        justifyContent: "center",
+        pointerEvents: "none",
+        zIndex: 5,
+      }}
+    >
+      <div
+        style={{
+          ...heavy(L),
+          fontSize: size,
+          lineHeight: 1.1,
+          textTransform: L.lang.script === "latin" || L.lang.script === "vietnamese" || L.lang.script === "cyrillic" ? "uppercase" : "none",
+          color: onColor(bg),
+          background: bg,
+          padding: `${size * 0.28}px ${size * 0.6}px`,
+          borderRadius: 999,
+          maxWidth: P ? 940 : 900,
+          textAlign: "center",
+          boxShadow: "0 14px 34px rgba(0,0,0,0.35)",
+          transform: `scale(${2 - p}) rotate(${-3 * p}deg)`,
+          opacity: Math.min(1, p * 2),
+        }}
+      >
+        {text}
+      </div>
+    </div>
+  );
+};

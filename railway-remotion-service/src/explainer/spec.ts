@@ -18,6 +18,9 @@ type Base = {
   // Social videos (2026-11-12): every spoken word and the frame it starts at,
   // for word-by-word captions. Absent on explainer videos.
   words?: Caption[];
+  // Social videos (2026-11-12): a curiosity "reloop" sticker (e.g. "WAIT FOR
+  // IT…") that pops in at the frame the voice says the reloop line.
+  reloop?: { text: string; at: number } | null;
 };
 
 // A headline may wrap one or more words in *stars* to set them in the accent color.
