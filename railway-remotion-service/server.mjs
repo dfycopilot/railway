@@ -4,6 +4,7 @@
  * POST /render-composition  — accepts a full composition spec, renders via Remotion, uploads MP4
  * POST /extract-frames      — extracts N evenly-spaced frames for AI vision (Viral Clips Mode)
  * POST /render-overlay      — legacy overlay-only endpoint (backwards compat)
+ * POST /capture-page        — phone-sized screenshot + element boxes of a public web page (capture.mjs)
  * GET  /health              — health check
  */
 
@@ -15,6 +16,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 import { spawn } from "child_process";
+import { registerCaptureRoute } from "./capture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -434,6 +436,9 @@ async function reportProgress(callbackUrl, headers, jobId, progress) {
     // Non-fatal
   }
 }
+
+// ---------- POST /capture-page ----------
+registerCaptureRoute(app, authMiddleware);
 
 app.listen(PORT, () => {
   console.log(`Remotion Composition Service running on port ${PORT}`);

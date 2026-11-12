@@ -23,8 +23,10 @@ import {
   useRise,
   visible,
   vlen,
+  SceneWordsProvider,
 } from "./kit";
 import { mix, onColor } from "./theme";
+import { DateView, Hook, Media, Profile, Quote, Screen, SocialEnd, Stamps, Tip } from "./social";
 import type {
   CardsScene,
   ChecklistScene,
@@ -178,7 +180,7 @@ const Card: React.FC<{ badge: string; title: string; text: string; color: string
         <div style={{ fontFamily: L.head, fontWeight: L.theme.headWeight, fontSize: row ? 46 : 52, lineHeight: 1.05, textTransform: L.theme.headUpper ? "uppercase" : "none" }}>
           {title}
         </div>
-        <div style={{ fontSize: 28, color: surfaceMuted(L), lineHeight: 1.4, marginTop: row ? 8 : 18 }}>{text}</div>
+        <div style={{ fontSize: L.social ? 36 : 28, color: surfaceMuted(L), lineHeight: 1.35, marginTop: row ? 8 : 18 }}>{text}</div>
       </div>
     </div>
   );
@@ -243,10 +245,12 @@ const Check: React.FC<{ text: string; delay: number; color: string; width: numbe
   const L = useLook();
   const color = plain ? visible(L, wanted) : wanted;
   const tick = interpolate(frame - delay, [6, 18], [24, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-  const box = plain ? { color: L.pal.ink, padding: "10px 4px" } : { ...cardStyle(L), padding: "20px 28px" };
+  // Social videos are watched on a phone, often small: bigger items (2026-11-12).
+  const big = L.social;
+  const box = plain ? { color: L.pal.ink, padding: "10px 4px" } : { ...cardStyle(L), padding: big ? "26px 32px" : "20px 28px" };
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 24, width, ...box, ...useItemIn(delay, index) }}>
-      <svg width="44" height="44" viewBox="0 0 44 44" style={{ flexShrink: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: big ? 28 : 24, width, ...box, ...useItemIn(delay, index) }}>
+      <svg width={big ? 58 : 44} height={big ? 58 : 44} viewBox="0 0 44 44" style={{ flexShrink: 0 }}>
         {L.theme.shadow === "outline" || L.theme.texture === "lines" ? (
           <rect x="3" y="3" width="38" height="38" rx={Math.min(10, L.theme.radius)} fill="none" stroke={color} strokeWidth="4" />
         ) : (
@@ -263,7 +267,7 @@ const Check: React.FC<{ text: string; delay: number; color: string; width: numbe
           strokeDashoffset={tick}
         />
       </svg>
-      <div style={{ fontSize: 32, fontWeight: 500 }}>{text}</div>
+      <div style={{ fontSize: big ? 44 : 32, fontWeight: big ? 700 : 500, lineHeight: 1.2 }}>{text}</div>
     </div>
   );
 };
@@ -605,10 +609,10 @@ const Steps: React.FC<{ s: StepsScene }> = ({ s }) => {
               >
                 {dot(i)}
                 <div>
-                  <div style={{ fontFamily: L.head, fontWeight: L.theme.headWeight, fontSize: 48 * L.theme.headScale, lineHeight: 1.05, textTransform: L.theme.headUpper ? "uppercase" : "none" }}>
+                  <div style={{ fontFamily: L.head, fontWeight: L.theme.headWeight, fontSize: (L.social ? 58 : 48) * L.theme.headScale, lineHeight: 1.05, textTransform: L.theme.headUpper ? "uppercase" : "none" }}>
                     {st.label}
                   </div>
-                  <div style={{ fontSize: 28, color: L.pal.muted, lineHeight: 1.4, marginTop: 10 }}>{st.detail}</div>
+                  <div style={{ fontSize: L.social ? 38 : 28, color: L.pal.muted, lineHeight: 1.4, marginTop: 10 }}>{st.detail}</div>
                 </div>
               </div>
             ))}
@@ -776,6 +780,9 @@ const PhoneView: React.FC<{ s: PhoneScene }> = ({ s }) => {
   );
 };
 
+// Social videos get their own end card (button + question); explainers keep theirs.
+const EndView: React.FC<{ s: EndScene }> = ({ s }) => (useLook().social ? <SocialEnd s={s} /> : <End s={s} />);
+
 // ── end card ─────────────────────────────────────────────────────────────
 const End: React.FC<{ s: EndScene }> = ({ s }) => {
   const P = usePortrait();
@@ -855,7 +862,13 @@ const End: React.FC<{ s: EndScene }> = ({ s }) => {
   );
 };
 
-export const SceneView: React.FC<{ scene: Scene }> = ({ scene }) => {
+export const SceneView: React.FC<{ scene: Scene }> = ({ scene }) => (
+  <SceneWordsProvider words={scene.words}>
+    <SceneBody scene={scene} />
+  </SceneWordsProvider>
+);
+
+const SceneBody: React.FC<{ scene: Scene }> = ({ scene }) => {
   switch (scene.type) {
     case "title":
       return <Title s={scene} />;
@@ -874,7 +887,23 @@ export const SceneView: React.FC<{ scene: Scene }> = ({ scene }) => {
     case "phone":
       return <PhoneView s={scene} />;
     case "end":
-      return <End s={scene} />;
+      return <EndView s={scene} />;
+    case "hook":
+      return <Hook s={scene} />;
+    case "stamps":
+      return <Stamps s={scene} />;
+    case "screen":
+      return <Screen s={scene} />;
+    case "media":
+      return <Media s={scene} />;
+    case "tip":
+      return <Tip s={scene} />;
+    case "date":
+      return <DateView s={scene} />;
+    case "profile":
+      return <Profile s={scene} />;
+    case "quote":
+      return <Quote s={scene} />;
     default:
       return <Stage>{null}</Stage>;
   }

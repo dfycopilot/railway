@@ -4,7 +4,7 @@
 // video's look (theme.ts) through LookContext, so one scene library makes six
 // built-in looks — and any look a user describes — feel different.
 import React from "react";
-import { AbsoluteFill, Easing, Img, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
+import { AbsoluteFill, Easing, Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
 import { Palette, Theme, LOOKS, VideoLanguage, cleanLanguage, contrast, fontFamily, lum, mix, onColor, resolve } from "./theme";
 
 export type Brand = {
@@ -33,6 +33,7 @@ export type Look = {
   body: string; // body font family
   picture: boolean; // a full-bleed picture is behind this scene
   lang: VideoLanguage; // the video's language (fonts, right-to-left, no spaces)
+  social: boolean; // "social" style (2026-11-12): word-by-word captions, bigger type, punch cuts
 };
 
 /** How wide a text is, in Latin letters: Chinese, Japanese and Korean
@@ -46,13 +47,20 @@ export const vlen = (t: string) => {
 const defaultLook = (): Look => {
   const theme = LOOKS.editorial;
   const brand: Brand = { name: "", initials: "", primary: "#1F4E79", accent: "#C8761E", phone: "", website: "" };
-  return { theme, brand, dark: false, pal: theme.light, head: "serif", body: "sans-serif", picture: false, lang: cleanLanguage(null) };
+  return { theme, brand, dark: false, pal: theme.light, head: "serif", body: "sans-serif", picture: false, lang: cleanLanguage(null), social: false };
 };
 
 const LookContext = React.createContext<Look | null>(null);
 export const useLook = (): Look => React.useContext(LookContext) ?? defaultLook();
 
-export function makeLook(theme: Theme, brand: Brand, dark: boolean, picture: boolean, lang: VideoLanguage = cleanLanguage(null)): Look {
+export function makeLook(
+  theme: Theme,
+  brand: Brand,
+  dark: boolean,
+  picture: boolean,
+  lang: VideoLanguage = cleanLanguage(null),
+  social = false,
+): Look {
   const raw = dark || picture ? theme.dark : theme.light;
   let pal: Palette = {
     bg: resolve(raw.bg, brand),
@@ -85,8 +93,32 @@ export function makeLook(theme: Theme, brand: Brand, dark: boolean, picture: boo
     body: fontFamily(theme.body, lang.script),
     picture,
     lang,
+    social,
   };
 }
+
+/** A media link: remote links (Copilot's signed links) as-is, bare names from public/. */
+export const mediaSrc = (u: string) => (/^(https?:|data:|blob:)/.test(u) ? u : staticFile(u.replace(/^\/+/, "")));
+
+// The scene being drawn (2026-11-12), so the caption can find the scene's
+// spoken words without every scene passing them along.
+type Word = { at: number; text: string };
+const SceneWordsContext = React.createContext<Word[] | undefined>(undefined);
+export const SceneWordsProvider: React.FC<{ words?: Word[]; children: React.ReactNode }> = ({ words, children }) => (
+  <SceneWordsContext.Provider value={words}>{children}</SceneWordsContext.Provider>
+);
+
+const HAND_FONTS = ["caveat", "patrick-hand", "kalam"];
+const HEAVY_FONTS = ["anton", "bebas", "archivo-black", "oswald", "barlow-condensed"];
+/** The look's loudest type, for social captions, stamps, chips and buttons:
+ *  its headline font when that one is heavy (or hand-written), else its body
+ *  font at extra-bold, in capitals unless hand-written. */
+export const heavy = (L: Look): React.CSSProperties => {
+  const t = L.theme;
+  if (HAND_FONTS.includes(t.head)) return { fontFamily: L.head, fontWeight: t.headWeight, textTransform: "none" };
+  if (HEAVY_FONTS.includes(t.head) || t.headWeight >= 700) return { fontFamily: L.head, fontWeight: Math.max(t.headWeight, 400), textTransform: "uppercase" };
+  return { fontFamily: L.body, fontWeight: 800, textTransform: "uppercase" };
+};
 
 export const LookProvider: React.FC<{ look: Look; children: React.ReactNode }> = ({ look, children }) => (
   <LookContext.Provider value={look}>{children}</LookContext.Provider>
@@ -307,8 +339,16 @@ export const SectionTag: React.FC<{ label: string }> = ({ label }) => {
 };
 
 // ── caption ────────────────────────────────────────────────────────────────
-// Pass several lines with start frames to change mid-scene.
-export const Caption: React.FC<{ lines: { at: number; text: string }[] }> = ({ lines }) => {
+// Pass several lines with start frames to change mid-scene. Social videos
+// with word timing show word-by-word captions instead (WordCaption).
+export const Caption: React.FC<{ lines: { at: number; text: string }[]; lift?: number }> = ({ lines, lift }) => {
+  const words = React.useContext(SceneWordsContext);
+  const L = useLook();
+  if (L.social && words && words.length) return <WordCaption words={words} lift={lift} />;
+  return <PhraseCaption lines={lines} />;
+};
+
+const PhraseCaption: React.FC<{ lines: { at: number; text: string }[] }> = ({ lines }) => {
   const frame = useCurrentFrame();
   const P = usePortrait();
   const L = useLook();
@@ -399,6 +439,110 @@ export const Caption: React.FC<{ lines: { at: number; text: string }[] }> = ({ l
   );
 };
 
+// ── word-by-word captions (social) ─────────────────────────────────────────
+/** Chunks of up to 3 words (about 4 characters in Chinese/Japanese), broken
+ *  after punctuation. */
+const chunkWords = (words: Word[], noSpaces: boolean): Word[][] => {
+  const out: Word[][] = [];
+  let cur: Word[] = [];
+  const clean = words
+    .filter((w) => w && typeof w.at === "number" && Number.isFinite(w.at) && String(w.text ?? "").trim())
+    .map((w) => ({ at: w.at, text: String(w.text).trim() }))
+    .sort((a, b) => a.at - b.at);
+  for (const w of clean) {
+    cur.push(w);
+    const punct = /[.,?!;:\u3002\uff0c\uff01\uff1f\u060c\u061f\u0964]["'\u201d\u2019)]*$/.test(w.text);
+    const full = noSpaces ? vlen(cur.map((x) => x.text).join("")) >= 8 : cur.length >= 3;
+    if (punct || full) {
+      out.push(cur);
+      cur = [];
+    }
+  }
+  if (cur.length) out.push(cur);
+  return out;
+};
+
+const WordCaption: React.FC<{ words: Word[]; lift?: number }> = ({ words, lift = 0 }) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const P = usePortrait();
+  const L = useLook();
+  const chunks = React.useMemo(() => chunkWords(words, L.lang.no_spaces), [words, L.lang.no_spaces]);
+  let idx = -1;
+  for (let i = 0; i < chunks.length; i++) if (frame >= chunks[i][0].at) idx = i;
+  if (idx < 0) return null;
+  const chunk = chunks[idx];
+  const lastWord = chunks[chunks.length - 1][chunks[chunks.length - 1].length - 1];
+  if (frame > lastWord.at + Math.round(1.3 * fps)) return null;
+  const text = chunk.map((w) => w.text).join(L.lang.no_spaces ? "" : " ");
+  const base = P ? 80 : 62;
+  const size = Math.round(Math.min(base, (base * 26) / Math.max(1, vlen(text))));
+  const stroke = mix(L.brand.primary, "#000000", 0.84);
+  // The spoken word: in the accent color, or (when the look boxes its captions,
+  // or the accent is too dark to read against the outline) on an accent box.
+  // (A brand color that doesn't show on this stage gives way to one that does.)
+  const hl = visible(L, L.brand.accent);
+  const boxed = ["highlight", "pill", "block"].includes(L.theme.caption) || contrast(hl, stroke) < 4.5;
+  const pop = interpolate(frame - chunk[0].at, [0, 4], [0.86, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const f = heavy(L);
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: P ? 60 : 160,
+        right: P ? 60 : 160,
+        ...(P ? { top: 1330 - lift } : { bottom: 64 + lift }),
+        display: "flex",
+        flexWrap: "wrap",
+        justifyContent: "center",
+        alignItems: "center",
+        columnGap: L.lang.no_spaces ? 0 : size * 0.26,
+        rowGap: size * 0.08,
+        ...f,
+        fontSize: size,
+        lineHeight: 1.12,
+        letterSpacing: L.lang.script === "arabic" || L.lang.script === "devanagari" ? 0 : 0.5,
+        textAlign: "center",
+        transform: `scale(${pop})`,
+        pointerEvents: "none",
+      }}
+    >
+      {chunk.map((w, i) => {
+        const spoken = frame >= w.at;
+        const on = spoken && (i === chunk.length - 1 || frame < chunk[i + 1].at);
+        const wp = interpolate(frame - w.at, [0, 3], [0.7, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+        const style: React.CSSProperties = {
+          display: "inline-block",
+          color: "#FFFFFF",
+          opacity: spoken ? 1 : 0,
+          transform: `scale(${spoken ? (on ? 1.08 : 1) * wp : 1})`,
+          WebkitTextStroke: `${Math.max(2, Math.round(size / 22))}px ${stroke}`,
+          paintOrder: "stroke fill",
+          textShadow: `0 ${Math.round(size / 14)}px 0 ${stroke}`,
+        };
+        if (on && boxed) {
+          Object.assign(style, {
+            background: hl,
+            color: onColor(hl),
+            padding: `0 ${size * 0.16}px`,
+            borderRadius: Math.min(L.theme.caption === "pill" ? size * 0.3 : 10, L.theme.radius + 4),
+            boxShadow: `0 ${Math.round(size / 14)}px 0 ${stroke}`,
+            textShadow: "none",
+            WebkitTextStroke: onColor(hl) === "#FFFFFF" ? `${Math.max(2, Math.round(size / 26))}px ${stroke}` : "0px transparent",
+          });
+        } else if (on) {
+          style.color = hl;
+        }
+        return (
+          <span key={i} style={style}>
+            {w.text.replace(/,$/, "")}
+          </span>
+        );
+      })}
+    </div>
+  );
+};
+
 // ── headline ───────────────────────────────────────────────────────────────
 // Words come in one after another, in the look's style. Wrap a word in *stars*
 // to set it in the accent color.
@@ -408,12 +552,15 @@ export const Headline: React.FC<{
   delay?: number;
   align?: "center" | "left";
   color?: string;
-}> = ({ text, size = 110, delay = 0, align = "center", color }) => {
+  accent?: string; // color for *starred* words (default: the brand accent)
+  stagger?: number; // frames between words (default 3; 1.5 without spaces)
+}> = ({ text, size = 110, delay = 0, align = "center", color, accent, stagger: staggerIn }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const L = useLook();
   const t = L.theme;
-  const sz = Math.round(size * t.headScale * (t.headUpper ? 0.82 : 1));
+  // Social videos set headlines about 12% bigger.
+  const sz = Math.round(size * t.headScale * (t.headUpper ? 0.82 : 1) * (L.social ? 1.12 : 1));
   // Words animate one by one. Languages written without spaces (Chinese,
   // Japanese) animate per character instead, keeping a *starred* phrase whole.
   const words = L.lang.no_spaces
@@ -424,7 +571,7 @@ export const Headline: React.FC<{
             part.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u3000-\u303f\uff00-\uffef]|[^\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u3000-\u303f\uff00-\uffef]+|\s+/gu) ?? [],
       )
     : (text || "").split(" ").filter(Boolean);
-  const stagger = L.lang.no_spaces ? 1.5 : 3;
+  const stagger = staggerIn ?? (L.lang.no_spaces ? 1.5 : 3);
   let shown = 0; // for "type": letters revealed so far
   const letterRate = 1.6; // letters per frame
   const totalLetters = Math.max(0, (frame - delay) * letterRate);
@@ -451,7 +598,7 @@ export const Headline: React.FC<{
         const style: React.CSSProperties = {
           display: "inline-block",
           fontStyle: starred && t.headItalicAccent ? "italic" : "normal",
-          color: starred ? L.brand.accent : undefined,
+          color: starred ? (accent ?? L.brand.accent) : undefined,
         };
         if (starred && t.accentFill) {
           Object.assign(style, {
