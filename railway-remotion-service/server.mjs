@@ -3,6 +3,7 @@
  *
  * POST /render-composition  — accepts a full composition spec, renders via Remotion, uploads MP4
  * POST /extract-frames      — extracts N evenly-spaced frames for AI vision (Viral Clips Mode)
+ * POST /extract-audio       — the speech track of a (long) video as a small MP3, for listening (AI Editor)
  * POST /render-overlay      — legacy overlay-only endpoint (backwards compat)
  * POST /capture-page        — phone-sized screenshot + element boxes of a public web page (capture.mjs)
  * GET  /health              — health check
@@ -364,6 +365,71 @@ app.post("/extract-frames", authMiddleware, async (req, res) => {
     console.error(`[extract-frames] Failed:`, err);
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     return res.status(500).json({ error: err.message || "Frame extraction failed" });
+  }
+});
+
+// ---------- POST /extract-audio ----------
+//
+// The AI Editor listens to a recording before it plans the edit (2026-11-12).
+// A 45-minute phone recording is 2–6 GB; sending that whole file to be
+// transcribed timed out. This pulls just the speech track — mono, 16 kHz,
+// 48 kbps MP3, about 16 MB for 45 minutes — and uploads it.
+//
+// Answers 202 at once and works in the background (long files take a few
+// minutes); reports to callback_url with the callback headers it was given.
+// ffmpeg reads the source over HTTPS itself (range requests), so a multi-GB
+// video never sits in this server's memory or disk.
+//
+// Request body: { job_id, source_video_url, upload: { signed_url, path },
+//                 callback_url, callback_headers }
+app.post("/extract-audio", authMiddleware, async (req, res) => {
+  const body = req.body || {};
+  const { job_id, source_video_url, upload, callback_url, callback_headers } = body;
+  if (!job_id || typeof source_video_url !== "string" || !/^https:\/\//.test(source_video_url)) {
+    return res.status(400).json({ error: "job_id and an https source_video_url are required" });
+  }
+  if (!upload?.signed_url || !upload?.path) {
+    return res.status(400).json({ error: "upload.signed_url and upload.path are required" });
+  }
+  res.status(202).json({ status: "processing", job_id });
+
+  const started = Date.now();
+  const out = `/tmp/audio_${crypto.randomUUID()}.mp3`;
+  try {
+    await new Promise((resolve, reject) => {
+      const proc = spawn("ffmpeg", [
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10",
+        "-i", source_video_url,
+        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "48k",
+        out,
+      ]);
+      let err = "";
+      proc.stderr.on("data", (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
+      // A stuck read must not hang forever: 20 minutes is far more than a
+      // 2-hour recording needs.
+      const timer = setTimeout(() => { proc.kill("SIGKILL"); reject(new Error("audio extraction timed out")); }, 20 * 60 * 1000);
+      proc.on("close", (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err.trim().slice(-500)}`)); });
+      proc.on("error", (e) => { clearTimeout(timer); reject(e); });
+    });
+    const buf = fs.readFileSync(out);
+    const up = await fetch(upload.signed_url, { method: "PUT", headers: { "Content-Type": "audio/mpeg" }, body: buf });
+    if (!up.ok) throw new Error(`audio upload failed: ${up.status} ${(await up.text().catch(() => "")).slice(0, 300)}`);
+    console.log(`[extract-audio] ${job_id}: ${(buf.length / 1024 / 1024).toFixed(1)}MB in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+    if (callback_url) {
+      await postWithRetry(callback_url, { "Content-Type": "application/json", ...(callback_headers || {}) }, {
+        job_id, status: "complete", audio_path: upload.path, bytes: buf.length, duration_ms: Date.now() - started,
+      });
+    }
+  } catch (err) {
+    console.error(`[extract-audio] ${job_id} failed:`, err);
+    if (callback_url) {
+      await postWithRetry(callback_url, { "Content-Type": "application/json", ...(callback_headers || {}) }, {
+        job_id, status: "error", error: String(err?.message || err).slice(0, 500),
+      });
+    }
+  } finally {
+    try { fs.unlinkSync(out); } catch {}
   }
 });
 
