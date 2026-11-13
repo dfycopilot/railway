@@ -33,6 +33,11 @@ export function getAspectCategory(width: number, height: number): AspectCategory
  */
 export function getOverlayScale(width: number): number {
   const REFERENCE_WIDTH = 1920;
+  // Phone-shaped videos (1080 wide, portrait or square) are watched on a
+  // phone held at arm's length: titles and cards there need to be BIG — the
+  // old 0.56× made a 72px title 40px, unreadable (Eric, 2026-11-13). Text
+  // wraps inside the 78% safe width, so larger never bleeds off the edges.
+  if (width < 1600) return 1.05;
   const ratio = width / REFERENCE_WIDTH;
   return Math.max(0.5, Math.min(1.0, ratio));
 }

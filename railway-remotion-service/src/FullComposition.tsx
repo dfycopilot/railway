@@ -4,6 +4,8 @@ import {
   Sequence,
   Audio,
   useVideoConfig,
+  useCurrentFrame,
+  interpolate,
 } from "remotion";
 import { VideoSegment } from "./components/VideoSegment";
 import { BrollInsert } from "./components/BrollInsert";
@@ -343,6 +345,16 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
               </Sequence>
             );
           }
+          case "flash": {
+            // A soft white flash at a new beat (Eric's own cuts, 2026-11-13):
+            // up to ~80% white in 3 frames, gone by the 10th.
+            const flashDur = Math.max(6, Math.min(15, dur));
+            return (
+              <Sequence key={sequenceKey} from={start} durationInFrames={flashDur}>
+                <FlashWash durationFrames={flashDur} strength={Math.max(0.3, Math.min(1, num(anim?.strength, 0.8)))} />
+              </Sequence>
+            );
+          }
           case "lottie":
           case "motion_graphic": {
             // Anchor: 9 positions (corners + edges + center). Defaults to
@@ -460,4 +472,12 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
       <Overlays config={allOverlays} />
     </AbsoluteFill>
   );
+};
+
+/** The flash itself: rises fast, fades a little slower. */
+const FlashWash: React.FC<{ durationFrames: number; strength: number }> = ({ durationFrames, strength }) => {
+  const frame = useCurrentFrame();
+  const peak = Math.min(3, durationFrames - 2);
+  const opacity = interpolate(frame, [0, peak, durationFrames], [0, strength, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  return <AbsoluteFill style={{ backgroundColor: "#FFFFFF", opacity, pointerEvents: "none" }} />;
 };
