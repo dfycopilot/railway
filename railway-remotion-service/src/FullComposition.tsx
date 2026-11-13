@@ -263,7 +263,9 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
       )}
 
       {/* ═══ LAYER 5: Captions ═══ */}
-      {captions.length > 0 && (
+      {/* Hidden when the recording already shows its own captions (the AI
+          Editor's final check, 2026-11-13) — the words would show twice. */}
+      {captions.length > 0 && specData.captions_hidden !== true && (
         <AbsoluteFill style={{ pointerEvents: "none" }}>
           <CaptionRenderer
             captions={captions}
