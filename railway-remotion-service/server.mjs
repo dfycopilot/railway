@@ -3,6 +3,7 @@
  *
  * POST /render-composition  — accepts a full composition spec, renders via Remotion, uploads MP4
  * POST /extract-frames      — extracts N evenly-spaced frames for AI vision (Viral Clips Mode)
+ * POST /frames-at           — small frames at given moments, inline (AI Editor final check)
  * POST /extract-audio       — the speech track of a (long) video as a small MP3, for listening (AI Editor)
  * POST /render-overlay      — legacy overlay-only endpoint (backwards compat)
  * POST /capture-page        — phone-sized screenshot + element boxes of a public web page (capture.mjs)
@@ -365,6 +366,56 @@ app.post("/extract-frames", authMiddleware, async (req, res) => {
     console.error(`[extract-frames] Failed:`, err);
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
     return res.status(500).json({ error: err.message || "Frame extraction failed" });
+  }
+});
+
+// ---------- POST /frames-at ----------
+//
+// The AI Editor's final check (2026-11-13) looks at what is already on screen
+// in the recording where it plans to put a title or graphic. This grabs
+// single frames at given moments, small, and returns them inline. ffmpeg
+// seeks over HTTPS itself (range requests), so a multi-GB recording is never
+// downloaded — each frame takes a second or two.
+//
+// Request body: { source_video_url, times: [seconds…] (max 16), width? }
+// Answer: { frames: [{ t, jpeg_base64 | null }] }
+app.post("/frames-at", authMiddleware, async (req, res) => {
+  const body = req.body || {};
+  const sourceUrl = String(body.source_video_url || "");
+  if (!/^https:\/\//.test(sourceUrl)) return res.status(400).json({ error: "source_video_url (https) is required" });
+  const times = (Array.isArray(body.times) ? body.times : [])
+    .map(Number).filter((t) => Number.isFinite(t) && t >= 0).slice(0, 16);
+  if (times.length === 0) return res.status(400).json({ error: "times is required" });
+  const width = Math.max(160, Math.min(720, Number(body.width) || 480));
+  const grab = (t) => new Promise((resolve) => {
+    const proc = spawn("ffmpeg", [
+      "-hide_banner", "-loglevel", "error",
+      "-ss", String(t), "-i", sourceUrl,
+      "-frames:v", "1", "-vf", `scale=${width}:-2`, "-q:v", "6",
+      "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    const timer = setTimeout(() => proc.kill("SIGKILL"), 20000);
+    proc.stdout.on("data", (c) => chunks.push(c));
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      const buf = Buffer.concat(chunks);
+      resolve(code === 0 && buf.length > 0 ? buf.toString("base64") : null);
+    });
+    proc.on("error", () => { clearTimeout(timer); resolve(null); });
+  });
+  try {
+    const frames = [];
+    // Four at a time: quick, without opening sixteen connections at once.
+    for (let i = 0; i < times.length; i += 4) {
+      const batch = times.slice(i, i + 4);
+      const got = await Promise.all(batch.map(grab));
+      batch.forEach((t, k) => frames.push({ t, jpeg_base64: got[k] }));
+    }
+    return res.json({ frames });
+  } catch (err) {
+    console.error("[frames-at] failed:", err);
+    return res.status(500).json({ error: err?.message || "frames failed" });
   }
 });
 
