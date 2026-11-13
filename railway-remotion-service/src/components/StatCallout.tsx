@@ -51,19 +51,35 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
 
   const counterProgress = interpolate(localFrame, [0, 20], [0, 1], { extrapolateRight: "clamp" });
 
-  const numericValue = parseFloat(value.replace(/[^0-9.]/g, ""));
-  const prefix = value.replace(/[0-9.,]+.*/, "");
-  const suffix = value.replace(/.*[0-9.,]/, "");
-  const displayNum = isNaN(numericValue)
-    ? value
-    : `${prefix}${Math.round(numericValue * counterProgress).toLocaleString()}${suffix}`;
+  // Count up only a plain number ("$325", "8 sprays", "45%"). Anything else —
+  // a rule or a phrase — shows as written. (The old split also dropped words
+  // after a number: "Lasts 8 hours." showed "Lasts 8".)
+  const numMatch = /^(\D{0,3}?)(\d[\d,]*(?:\.\d+)?)(\D{0,14})$/.exec(value.trim());
+  const displayNum = numMatch
+    ? `${numMatch[1]}${Math.round(parseFloat(numMatch[2].replace(/,/g, "")) * counterProgress).toLocaleString()}${numMatch[3]}`
+    : value;
 
-  const positionStyle: React.CSSProperties =
+  // Big on a phone, smaller as the text gets longer, never broken mid-word
+  // (2026-11-13: "impressio / ns", "SPRAY / S" — the box was squeezed into
+  // half the screen because it was centered from the middle).
+  const len = value.trim().length;
+  const valueSize = Math.round((len <= 6 ? 140 : len <= 12 ? 116 : len <= 22 ? 96 : 80) * scale);
+  const labelSize = Math.round(34 * scale);
+  const noBreak: React.CSSProperties = { wordBreak: "normal", overflowWrap: "normal", hyphens: "none", whiteSpace: "normal" };
+
+  // The lane the box sits in: most of the screen width for the center,
+  // a wide side lane for left/right. The box itself fits its text inside it.
+  const lane: React.CSSProperties =
     position === "left"
-      ? { left: "10%", top: "50%", transform: `translateY(-50%) scale(${animScale})` }
+      ? { left: "5%", width: "62%", top: "50%", justifyContent: "flex-start" }
       : position === "right"
-      ? { right: "10%", top: "50%", transform: `translateY(-50%) scale(${animScale})` }
-      : { left: "50%", top: "50%", transform: `translate(-50%, -50%) scale(${animScale})` };
+      ? { right: "5%", width: "62%", top: "50%", justifyContent: "flex-end" }
+      : { left: "7%", right: "7%", top: "50%", justifyContent: "center" };
+  const positionStyle: React.CSSProperties = {
+    ...lane,
+    transform: `translateY(-50%) scale(${animScale})`,
+    transformOrigin: position === "left" ? "left center" : position === "right" ? "right center" : "center center",
+  };
 
   return (
     <div
@@ -72,8 +88,6 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
         ...positionStyle,
         opacity,
         display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
         zIndex: 50,
       }}
     >
@@ -83,17 +97,17 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
           accentColor={color}
           radius={Math.round(20 * scale)}
           padding={`${Math.round(28 * scale)}px ${Math.round(52 * scale)}px`}
-          style={{ maxWidth: "78%" }}
+          style={{ maxWidth: "100%", textAlign: "center" }}
         >
           <div
             style={{
               fontFamily: "Oswald, sans-serif",
               fontWeight: 700,
-              fontSize: Math.round(72 * scale),
+              fontSize: valueSize,
               color,
-              lineHeight: 1,
-              letterSpacing: "-0.02em",
-              wordBreak: "break-word",
+              lineHeight: 1.05,
+              letterSpacing: "-0.01em",
+              ...noBreak,
             }}
           >
             {displayNum}
@@ -102,13 +116,13 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
             style={{
               fontFamily: "Inter, sans-serif",
               fontWeight: 500,
-              fontSize: Math.round(22 * scale),
+              fontSize: labelSize,
               color: "#FFFFFF",
-              marginTop: Math.round(8 * scale),
+              marginTop: Math.round(12 * scale),
               textTransform: "uppercase",
               letterSpacing: "0.15em",
               opacity: 0.9,
-              wordBreak: "break-word",
+              ...noBreak,
             }}
           >
             {label}
@@ -120,22 +134,22 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
             background: "rgba(0,0,0,0.75)",
             backdropFilter: "blur(12px)",
             borderRadius: Math.round(16 * scale),
-            padding: `${Math.round(24 * scale)}px ${Math.round(48 * scale)}px`,
+            padding: `${Math.round(28 * scale)}px ${Math.round(44 * scale)}px`,
             border: `2px solid ${color}`,
             boxShadow: `0 0 40px ${color}44, 0 8px 32px rgba(0,0,0,0.5)`,
             textAlign: "center",
-            maxWidth: "78%",
+            maxWidth: "100%",
           }}
         >
           <div
             style={{
               fontFamily: "Oswald, sans-serif",
               fontWeight: 700,
-              fontSize: Math.round(72 * scale),
+              fontSize: valueSize,
               color,
-              lineHeight: 1,
-              letterSpacing: "-0.02em",
-              wordBreak: "break-word",
+              lineHeight: 1.05,
+              letterSpacing: "-0.01em",
+              ...noBreak,
             }}
           >
             {displayNum}
@@ -144,13 +158,13 @@ export const StatCallout: React.FC<StatCalloutProps> = ({
             style={{
               fontFamily: "Inter, sans-serif",
               fontWeight: 500,
-              fontSize: Math.round(22 * scale),
+              fontSize: labelSize,
               color: "#FFFFFF",
-              marginTop: Math.round(8 * scale),
+              marginTop: Math.round(12 * scale),
               textTransform: "uppercase",
               letterSpacing: "0.15em",
               opacity: 0.85,
-              wordBreak: "break-word",
+              ...noBreak,
             }}
           >
             {label}
