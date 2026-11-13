@@ -381,10 +381,14 @@ app.post("/extract-frames", authMiddleware, async (req, res) => {
 // video never sits in this server's memory or disk.
 //
 // Request body: { job_id, source_video_url, upload: { signed_url, path },
+//                 parts?: [{ signed_url, path, start, duration }],
 //                 callback_url, callback_headers }
+// parts: the same audio cut into pieces (seconds) — a 45-minute recording
+// can't be listened to inside one 150-second call; five minutes can.
 app.post("/extract-audio", authMiddleware, async (req, res) => {
   const body = req.body || {};
   const { job_id, source_video_url, upload, callback_url, callback_headers } = body;
+  const parts = Array.isArray(body.parts) ? body.parts.slice(0, 40) : [];
   if (!job_id || typeof source_video_url !== "string" || !/^https:\/\//.test(source_video_url)) {
     return res.status(400).json({ error: "job_id and an https source_video_url are required" });
   }
@@ -415,10 +419,32 @@ app.post("/extract-audio", authMiddleware, async (req, res) => {
     const buf = fs.readFileSync(out);
     const up = await fetch(upload.signed_url, { method: "PUT", headers: { "Content-Type": "audio/mpeg" }, body: buf });
     if (!up.ok) throw new Error(`audio upload failed: ${up.status} ${(await up.text().catch(() => "")).slice(0, 300)}`);
-    console.log(`[extract-audio] ${job_id}: ${(buf.length / 1024 / 1024).toFixed(1)}MB in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+    // The pieces, cut from the MP3 just made (stream copy: seconds each).
+    const doneParts = [];
+    for (const p of parts) {
+      if (!p?.signed_url || !p?.path) continue;
+      const start = Math.max(0, Number(p.start) || 0);
+      const dur = Math.max(1, Number(p.duration) || 600);
+      const partFile = `${out}.${doneParts.length}.mp3`;
+      try {
+        await new Promise((resolve, reject) => {
+          const proc = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(start), "-t", String(dur), "-i", out, "-c", "copy", partFile]);
+          proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`part ffmpeg exited ${code}`)));
+          proc.on("error", reject);
+        });
+        const pb = fs.readFileSync(partFile);
+        if (pb.length < 1000) break; // past the end of the recording
+        const pu = await fetch(p.signed_url, { method: "PUT", headers: { "Content-Type": "audio/mpeg" }, body: pb });
+        if (!pu.ok) throw new Error(`part upload failed: ${pu.status}`);
+        doneParts.push({ path: p.path, start });
+      } finally {
+        try { fs.unlinkSync(partFile); } catch {}
+      }
+    }
+    console.log(`[extract-audio] ${job_id}: ${(buf.length / 1024 / 1024).toFixed(1)}MB, ${doneParts.length} parts, in ${((Date.now() - started) / 1000).toFixed(1)}s`);
     if (callback_url) {
       await postWithRetry(callback_url, { "Content-Type": "application/json", ...(callback_headers || {}) }, {
-        job_id, status: "complete", audio_path: upload.path, bytes: buf.length, duration_ms: Date.now() - started,
+        job_id, status: "complete", audio_path: upload.path, parts: doneParts, bytes: buf.length, duration_ms: Date.now() - started,
       });
     }
   } catch (err) {
