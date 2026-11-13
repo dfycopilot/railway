@@ -121,8 +121,12 @@ export const VideoSegment: React.FC<VideoSegmentProps> = ({
   const trimBeforeFrames = Math.max(0, Math.round(trimStart * fps));
   const effectiveTrimEndSec =
     trimEnd > trimStart ? trimEnd : trimStart + sceneDur / fps;
+  // At least as many source frames as the slot is long. Rounding the start
+  // and end separately could leave the clip one frame short of its slot, and
+  // that last frame showed BLACK at the cut (Eric 2026-11-13: "clear black
+  // screen between cuts" — 7 of 57 cuts in his video).
   const trimAfterFrames = Math.max(
-    trimBeforeFrames + 1,
+    trimBeforeFrames + Math.max(1, Math.round(sceneDur)),
     Math.round(effectiveTrimEndSec * fps)
   );
 
