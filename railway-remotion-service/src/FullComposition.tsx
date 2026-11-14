@@ -238,6 +238,7 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
               videoUrl={url}
               effects={scene?.effects}
               sceneDurationFrames={dur}
+              trimStartSec={num(scene?.clip_start_at ?? scene?.trim_start ?? scene?.trimStart, 0)}
             />
           </Sequence>
         );

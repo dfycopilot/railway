@@ -17,6 +17,9 @@ interface BrollInsertProps {
    * scene's actual visible window instead of the whole composition.
    */
   sceneDurationFrames?: number;
+  /** Seconds into the clip to start from (stock clips often open on an empty
+   *  or dark moment — the picker starts them in the middle). */
+  trimStartSec?: number;
 }
 
 /**
@@ -31,9 +34,13 @@ export const BrollInsert: React.FC<BrollInsertProps> = ({
   videoUrl,
   effects,
   sceneDurationFrames,
+  trimStartSec,
 }) => {
   const frame = useCurrentFrame();
-  const { durationInFrames: compDuration } = useVideoConfig();
+  const { durationInFrames: compDuration, fps } = useVideoConfig();
+  const trimBefore = Number.isFinite(trimStartSec) && (trimStartSec as number) > 0
+    ? Math.round((trimStartSec as number) * fps)
+    : 0;
 
   const sceneDur = Math.max(
     1,
@@ -72,6 +79,7 @@ export const BrollInsert: React.FC<BrollInsertProps> = ({
       >
         <Video
           src={videoUrl}
+          {...(trimBefore > 0 ? { trimBefore } : {})}
           objectFit="cover"
           style={{ width: "100%", height: "100%" }}
           muted
