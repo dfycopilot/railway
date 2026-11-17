@@ -3,6 +3,7 @@ import {
   AbsoluteFill,
   Sequence,
   Audio,
+  Img,
   useVideoConfig,
   useCurrentFrame,
   interpolate,
@@ -20,6 +21,7 @@ import { BadgeCard } from "./components/BadgeCard";
 import { LottieGraphic } from "./components/LottieGraphic";
 import { CompanionPanel, type CompanionSpec } from "./components/CompanionPanel";
 import { getLayoutSlots, normalizeLayout } from "./components/SceneLayout";
+import { Video as MediaVideo } from "@remotion/media";
 
 /**
  * FullComposition v3 — Sequence-based timeline.
@@ -86,8 +88,96 @@ export function musicEnvelope(frame: number, total: number, fps: number): number
   return Math.max(0, Math.min(a, b));
 }
 
+/**
+ * The whole video (2026-11-17): the edit's own timeline, with the Brand
+ * Library's clips and intro cut in by making room for them — the timeline
+ * pauses at each insert's frame, the clip plays with its own sound, and the
+ * timeline carries on. Music runs under all of it.
+ */
 export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) => {
   const { fps, durationInFrames } = useVideoConfig();
+  const inserts = planInserts(specData?.inserts, durationInFrames);
+  const added = inserts.reduce((t, x) => t + x.frames, 0);
+  const timelineFrames = Math.max(1, Math.round(num(specData?.timeline_frames, durationInFrames - added)));
+  const music = specData?.music || null;
+  const musicUrl = music ? firstUrl(music.src, music.url, music.music_url, music.musicUrl) : "";
+  const musicVolume = music ? num(music.volume ?? music.level, 0.15) : 0.15;
+
+  const pieces: React.ReactNode[] = [];
+  let cursor = 0;
+  let out = 0;
+  const timelinePiece = (from: number, to: number) => {
+    if (to <= from) return;
+    pieces.push(
+      <Sequence key={`tl-${from}`} from={out} durationInFrames={to - from} layout="none">
+        <Sequence from={-from} layout="none">
+          <Timeline specData={specData} timelineFrames={timelineFrames} />
+        </Sequence>
+      </Sequence>,
+    );
+    out += to - from;
+  };
+  for (const ins of inserts) {
+    const at = Math.min(Math.max(ins.at_frame, cursor), timelineFrames);
+    timelinePiece(cursor, at);
+    cursor = at;
+    pieces.push(
+      <Sequence key={`ins-${out}`} from={out} durationInFrames={ins.frames}>
+        <AbsoluteFill style={{ backgroundColor: "#000" }}>
+          <MediaVideo src={ins.url} volume={1} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        </AbsoluteFill>
+      </Sequence>,
+    );
+    out += ins.frames;
+  }
+  timelinePiece(cursor, timelineFrames);
+
+  return (
+    <AbsoluteFill style={{ backgroundColor: "#000" }}>
+      {pieces}
+      {/* Background music under the whole video, inserts included. Loops if
+          the song is shorter than the video, and fades in/out with it
+          (2026-11-17): a 2:37 AI Editor cut got a 2:00 song and the last
+          37 s had no music — every jump cut stood out. */}
+      {musicUrl && (
+        <Sequence from={0} durationInFrames={durationInFrames}>
+          <AbsoluteFill style={{ opacity: 0, pointerEvents: "none" }}>
+            <Audio
+              src={musicUrl}
+              loop
+              loopVolumeCurveBehavior="extend"
+              volume={(f) => musicVolume * musicEnvelope(f, durationInFrames, fps)}
+            />
+          </AbsoluteFill>
+        </Sequence>
+      )}
+    </AbsoluteFill>
+  );
+};
+
+type Insert = { at_frame: number; frames: number; url: string };
+
+/** The inserts the spec asks for, in order, never past the video's end. */
+export function planInserts(raw: unknown, totalFrames: number): Insert[] {
+  if (!Array.isArray(raw)) return [];
+  const list = raw
+    .map((x: any) => ({ at_frame: Math.max(0, Math.round(num(x?.at_frame))), frames: Math.round(num(x?.frames)), url: firstUrl(x?.url) }))
+    .filter((x) => x.frames > 0 && x.url)
+    .sort((a, b) => a.at_frame - b.at_frame);
+  const out: Insert[] = [];
+  let used = 0;
+  for (const x of list) {
+    if (used + x.frames >= totalFrames) break;
+    out.push(x);
+    used += x.frames;
+  }
+  return out;
+}
+
+/** The edit's own timeline: speaker, cutaways, speech, captions, graphics. */
+const Timeline: React.FC<FullCompositionProps & { timelineFrames: number }> = ({ specData, timelineFrames }) => {
+  const { fps } = useVideoConfig();
+  const durationInFrames = timelineFrames;
 
   if (!specData) {
     return (
@@ -148,12 +238,6 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
     ? specData.audio_segments || specData.audioSegments
     : [];
 
-  // Music
-  const music = specData.music || null;
-  const musicUrl = music
-    ? firstUrl(music.src, music.url, music.music_url, music.musicUrl)
-    : "";
-  const musicVolume = music ? num(music.volume ?? music.level, 0.15) : 0.15;
 
   // Normalize and split scenes by type
   const normalizedScenes = scenes.map((s: any) => {
@@ -267,23 +351,6 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
         />
       </AbsoluteFill>
 
-      {/* ═══ LAYER 4: Background music ═══ */}
-      {musicUrl && (
-        <Sequence from={0} durationInFrames={durationInFrames}>
-          <AbsoluteFill style={{ opacity: 0, pointerEvents: "none" }}>
-            {/* Loops if the song is shorter than the video, and fades in/out
-                with it (2026-11-17): a 2:37 AI Editor cut got a 2:00 song and
-                the last 37 s had no music — every jump cut stood out. */}
-            <Audio
-              src={musicUrl}
-              loop
-              loopVolumeCurveBehavior="extend"
-              volume={(f) => musicVolume * musicEnvelope(f, durationInFrames, fps)}
-            />
-          </AbsoluteFill>
-        </Sequence>
-      )}
-
       {/* ═══ LAYER 5: Captions ═══ */}
       {/* Hidden when the recording already shows its own captions (the AI
           Editor's final check, 2026-11-13) — the words would show twice. */}
@@ -362,6 +429,23 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
                     aesthetic={animAesthetic}
                   />
                 </AbsoluteFill>
+              </Sequence>
+            );
+          }
+          case "image_card": {
+            // A Brand Library picture or logo (2026-11-17).
+            const src = firstUrl(anim?.image_url);
+            if (!src) return null;
+            return (
+              <Sequence key={sequenceKey} from={start} durationInFrames={dur}>
+                <ImageCard
+                  src={src}
+                  durationFrames={dur}
+                  position={String(anim?.position || "center")}
+                  size={Math.max(0.05, Math.min(1, num(anim?.size, 0.6)))}
+                  opacity={Math.max(0.1, Math.min(1, num(anim?.opacity, 1)))}
+                  animation={String(anim?.animation || "pop")}
+                />
               </Sequence>
             );
           }
@@ -500,4 +584,52 @@ const FlashWash: React.FC<{ durationFrames: number; strength: number }> = ({ dur
   const peak = Math.min(3, durationFrames - 2);
   const opacity = interpolate(frame, [0, peak, durationFrames], [0, strength, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   return <AbsoluteFill style={{ backgroundColor: "#FFFFFF", opacity, pointerEvents: "none" }} />;
+};
+
+/** A Brand Library picture: pops (or fades) in, holds, fades out. */
+const ImageCard: React.FC<{ src: string; durationFrames: number; position: string; size: number; opacity: number; animation: string }> = ({
+  src, durationFrames, position, size, opacity, animation,
+}) => {
+  const frame = useCurrentFrame();
+  const { width } = useVideoConfig();
+  const fadeOut = Math.min(8, Math.floor(durationFrames / 3));
+  const out = fadeOut > 0 ? interpolate(frame, [durationFrames - fadeOut, durationFrames], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }) : 1;
+  let inn = 1;
+  let scale = 1;
+  if (animation === "pop") {
+    inn = interpolate(frame, [0, 4], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+    scale = interpolate(frame, [0, 5, 9], [0.6, 1.06, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  } else if (animation === "fade") {
+    inn = interpolate(frame, [0, 10], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  }
+  const inset = Math.round(width * 0.05);
+  const w = Math.round(width * size);
+  const place: React.CSSProperties = (() => {
+    switch (position) {
+      case "top_left": return { top: inset, left: inset };
+      case "top_center": return { top: inset, left: "50%", transform: "translateX(-50%)" };
+      case "top_right": return { top: inset, right: inset };
+      case "bottom_left": return { bottom: inset * 2, left: inset };
+      case "bottom_center": return { bottom: inset * 2, left: "50%", transform: "translateX(-50%)" };
+      case "bottom_right": return { bottom: inset * 2, right: inset };
+      default: return { top: "50%", left: "50%", transform: "translate(-50%, -50%)" };
+    }
+  })();
+  return (
+    <AbsoluteFill style={{ pointerEvents: "none" }}>
+      <div style={{ position: "absolute", ...place }}>
+        <Img
+          src={src}
+          style={{
+            width: w,
+            height: "auto",
+            display: "block",
+            opacity: opacity * inn * out,
+            transform: `scale(${scale})`,
+            filter: "drop-shadow(0 10px 30px rgba(0,0,0,0.45))",
+          }}
+        />
+      </div>
+    </AbsoluteFill>
+  );
 };
