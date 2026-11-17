@@ -2,7 +2,8 @@
 # Processes user photos: expression modification + background removal
 #
 # Build: docker build -f Dockerfile.thumbnail -t thumbnail-service .
-# Run:   docker run --gpus all -p 8080:8080 -e THUMBNAIL_SERVICE_SECRET=test123 thumbnail-service
+# Run:   docker run --gpus all -p 8080:8080 -e THUMBNAIL_SERVICE_SECRET=<a long random value> thumbnail-service
+#        (required by thumbnail_server.py: without it every request is refused)
 
 FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
 

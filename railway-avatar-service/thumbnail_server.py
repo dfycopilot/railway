@@ -12,11 +12,15 @@ Processing pipeline:
   4. Combine: apply rembg alpha mask to LivePortrait output
   5. Return: base64 PNG cutout
 
-Authentication: Bearer token via THUMBNAIL_SERVICE_SECRET env var.
+Authentication: Bearer token via THUMBNAIL_SERVICE_SECRET env var. Required:
+with it missing or empty, every request is refused (503) — there is no
+default secret (it used to be "test123", so a service started without the
+variable let anyone in with that word).
 """
 
 import asyncio
 import base64
+import hmac
 import io
 import logging
 import os
@@ -38,7 +42,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("thumbnail-service")
 
 # ── Configuration ────────────────────────────────────────────
-SECRET = os.environ.get("THUMBNAIL_SERVICE_SECRET", "test123")
+# No default: without the variable, nothing gets in (see verify_auth).
+SECRET = os.environ.get("THUMBNAIL_SERVICE_SECRET", "").strip()
 EXPRESSIONS_DIR = Path("/app/expressions")
 LIVEPORTRAIT_DIR = Path("/app/LivePortrait")
 
@@ -57,10 +62,13 @@ app.add_middleware(
 
 
 def verify_auth(authorization: Optional[str] = Header(None)):
+    if not SECRET:
+        # Not set up: refuse everyone rather than fall back to a guessable word.
+        raise HTTPException(503, "This service has no THUMBNAIL_SERVICE_SECRET set, so it accepts no requests")
     if not authorization:
         raise HTTPException(401, "Missing Authorization header")
     token = authorization.replace("Bearer ", "").strip()
-    if token != SECRET:
+    if not hmac.compare_digest(token.encode(), SECRET.encode()):
         raise HTTPException(401, "Invalid token")
 
 
@@ -111,6 +119,8 @@ def load_models():
 
 @app.on_event("startup")
 async def startup():
+    if not SECRET:
+        log.error("THUMBNAIL_SERVICE_SECRET is not set: every request will be refused until it is")
     load_models()
 
 
@@ -226,6 +236,7 @@ async def health():
 
     return JSONResponse({
         "status": "healthy",
+        "auth_configured": bool(SECRET),
         "gpu": gpu_available,
         "gpu_name": gpu_name,
         "gpu_memory": gpu_memory,
