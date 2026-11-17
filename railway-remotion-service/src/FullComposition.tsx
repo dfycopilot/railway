@@ -75,6 +75,17 @@ interface FullCompositionProps {
   specData?: any;
 }
 
+/** Background-music level over the video: a short fade in, full level, and a
+ *  2-second fade out ending on the last frame (also smooths a looped song's
+ *  end, so the video never stops on a cut-off note). */
+export function musicEnvelope(frame: number, total: number, fps: number): number {
+  const fadeIn = Math.round(fps * 0.5);
+  const fadeOut = Math.min(Math.round(fps * 2), Math.floor(total / 3));
+  const a = fadeIn > 0 ? Math.min(1, frame / fadeIn) : 1;
+  const b = fadeOut > 0 ? Math.min(1, Math.max(0, (total - frame) / fadeOut)) : 1;
+  return Math.max(0, Math.min(a, b));
+}
+
 export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) => {
   const { fps, durationInFrames } = useVideoConfig();
 
@@ -260,7 +271,15 @@ export const FullComposition: React.FC<FullCompositionProps> = ({ specData }) =>
       {musicUrl && (
         <Sequence from={0} durationInFrames={durationInFrames}>
           <AbsoluteFill style={{ opacity: 0, pointerEvents: "none" }}>
-            <Audio src={musicUrl} volume={musicVolume} />
+            {/* Loops if the song is shorter than the video, and fades in/out
+                with it (2026-11-17): a 2:37 AI Editor cut got a 2:00 song and
+                the last 37 s had no music — every jump cut stood out. */}
+            <Audio
+              src={musicUrl}
+              loop
+              loopVolumeCurveBehavior="extend"
+              volume={(f) => musicVolume * musicEnvelope(f, durationInFrames, fps)}
+            />
           </AbsoluteFill>
         </Sequence>
       )}
