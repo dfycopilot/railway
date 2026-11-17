@@ -48,16 +48,22 @@ const app = express();
 app.use(express.json({ limit: "50mb" }));
 
 const PORT = process.env.PORT || 3000;
-const AUTH_TOKEN = process.env.COMPOSITOR_AUTH_TOKEN || process.env.AUTH_TOKEN;
+const AUTH_TOKEN = (process.env.COMPOSITOR_AUTH_TOKEN || process.env.AUTH_TOKEN || "").trim();
 
 // ── Auth middleware ──
+// Same secret, compared in constant time.
+function sameSecret(given, wanted) {
+  const a = Buffer.from(String(given || ""));
+  const b = Buffer.from(String(wanted || ""));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function authMiddleware(req, res, next) {
+  // No token set: refuse everyone (2026-11-17) — it used to let everyone in.
   if (!AUTH_TOKEN) {
-    console.warn("[auth] COMPOSITOR_AUTH_TOKEN not set — allowing unauthenticated request");
-    return next();
+    return res.status(503).json({ error: "This service has no COMPOSITOR_AUTH_TOKEN set, so it accepts no requests" });
   }
-  const header = req.headers.authorization || "";
-  if (header !== `Bearer ${AUTH_TOKEN}`) {
+  if (!sameSecret(req.headers.authorization, `Bearer ${AUTH_TOKEN}`)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   next();
@@ -65,7 +71,7 @@ function authMiddleware(req, res, next) {
 
 // ── Health ──
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "slide-compositor", version: "1.1.0" });
+  res.json({ status: "ok", service: "slide-compositor", version: "1.1.0", auth_configured: !!AUTH_TOKEN });
 });
 
 // ── Position → overlay coordinates ──

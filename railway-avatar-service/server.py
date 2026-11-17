@@ -15,6 +15,7 @@ Authentication: Bearer token via AVATAR_SERVICE_SECRET env var.
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -41,7 +42,8 @@ log = logging.getLogger("avatar-service")
 
 # ── Config ───────────────────────────────────────────────────
 PORT = int(os.environ.get("PORT", 8080))
-SECRET = os.environ.get("AVATAR_SERVICE_SECRET", "")
+# No default: without the variable, nothing gets in (see verify_auth, 2026-11-17).
+SECRET = os.environ.get("AVATAR_SERVICE_SECRET", "").strip()
 HALLO2_DIR = Path("/app/hallo2")
 JOBS_DIR = Path("/tmp/avatar_jobs")
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,11 +64,12 @@ app.add_middleware(
 # ── Auth ─────────────────────────────────────────────────────
 def verify_auth(authorization: Optional[str] = None):
     if not SECRET:
-        return
+        # Not set up: refuse everyone (it used to let everyone in).
+        raise HTTPException(503, "This service has no AVATAR_SERVICE_SECRET set, so it accepts no requests")
     if not authorization:
         raise HTTPException(401, "Missing Authorization header")
-    token = str(authorization or "").replace("Bearer ", "")
-    if token != SECRET:
+    token = str(authorization or "").replace("Bearer ", "").strip()
+    if not hmac.compare_digest(token.encode(), SECRET.encode()):
         raise HTTPException(403, "Invalid token")
 
 
